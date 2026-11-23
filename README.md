@@ -77,6 +77,7 @@ cargo run -q -p agent-operator -- render agents/my-agent | kubectl apply -f -
 - [Agent API (v1)](#agent-api-v1) and the [console](#console)
 - [Kubernetes](#kubernetes): the `Agent` resource, models, MCP servers, sessions, `render`, Agent Studio, the operator
 - [Code map](#code-map), [known issues](#known-issues), and open items in [docs/todo.md](docs/todo.md)
+- [docs/agent-specs.md](docs/agent-specs.md): existing agent specs (Open Agent Spec, A2A Agent Card, OASF, Agent Skills) and how this project compares with kagent
 
 ## Without Kubernetes
 
