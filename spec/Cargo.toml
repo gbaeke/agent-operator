@@ -1,0 +1,9 @@
+[package]
+name = "agent-spec"
+version = "0.1.0"
+edition = "2024"
+description = "What makes an agent unique: the agent.yaml format, shared by the runtime and the operator's Agent resource."
+
+[dependencies]
+schemars = "1"
+serde = { version = "1.0.229", features = ["derive"] }

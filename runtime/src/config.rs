@@ -15,96 +15,13 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use serde::Deserialize;
 
 use crate::kb::KnowledgeBase;
 use crate::skills::Skill;
 
-pub const DEFAULT_MODEL: &str = "anthropic/claude-sonnet-5-5";
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AgentConfig {
-    /// Shown in the UI. Defaults to the folder name.
-    pub name: Option<String>,
-    pub description: Option<String>,
-    /// `vendor/model`, e.g. `anthropic/claude-sonnet-5-5`, `openai/gpt-5.5`,
-    /// `ollama/qwen3:4b`. The key comes from the vendor's usual variable.
-    #[serde(default = "default_model")]
-    pub model: String,
-    /// Send model calls here instead, e.g. a gateway. Empty means unset.
-    /// Behind a gateway the vendor's API key may be unset.
-    pub base_url: Option<String>,
-    #[serde(default = "default_max_tokens")]
-    pub max_tokens: u64,
-    pub temperature: Option<f64>,
-    /// Model calls per user message.
-    #[serde(default = "default_max_turns")]
-    pub max_turns: usize,
-    /// The system prompt. If absent, `instructions.md` is used.
-    pub instructions: Option<String>,
-    /// The built-in tool groups to enable. Absent means all of them.
-    /// `knowledge` and `skills` only appear when their folder has content.
-    pub tools: Option<Vec<Builtin>>,
-    #[serde(default)]
-    pub mcp_servers: Vec<McpServer>,
-    /// Specialists the `task` tool can hand work to. Without any, `task`
-    /// starts a general-purpose subagent.
-    #[serde(default)]
-    pub subagents: Vec<SubagentConfig>,
-    /// Example prompts for the UI.
-    #[serde(default)]
-    pub examples: Vec<String>,
-}
-
-#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum Builtin {
-    /// `write_todos`, plus a check that the plan is finished before answering.
-    Planning,
-    /// A scratch filesystem in the session: `ls`, `read_file`, `write_file`, `edit_file`.
-    Files,
-    /// Search over `knowledge/`: `search_knowledge_base`, `read_document`, `list_documents`.
-    Knowledge,
-    /// `load_skill` for the skills in `skills/`.
-    Skills,
-    /// `task`: hand a self-contained job to a subagent with its own context.
-    Subagents,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct McpServer {
-    pub url: String,
-    /// Only these tools of the server; absent means all.
-    pub tools: Option<Vec<String>>,
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct SubagentConfig {
-    pub name: String,
-    /// Tells the main agent when to use this subagent.
-    pub description: String,
-    pub instructions: String,
-    /// Defaults to the agent's model.
-    pub model: Option<String>,
-    #[serde(default = "default_subagent_turns")]
-    pub max_turns: usize,
-}
-
-fn default_model() -> String {
-    DEFAULT_MODEL.to_owned()
-}
-fn default_max_tokens() -> u64 {
-    8192
-}
-fn default_max_turns() -> usize {
-    40
-}
-fn default_subagent_turns() -> usize {
-    15
-}
+pub use agent_spec::{AgentConfig, Builtin, McpServer};
+#[cfg(test)]
+use agent_spec::DEFAULT_MODEL;
 
 /// A loaded agent folder.
 pub struct Bundle {
@@ -137,8 +54,7 @@ impl Bundle {
             (path.parent().unwrap_or(Path::new(".")).to_owned(), path.to_owned())
         };
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let config: AgentConfig = serde_yaml_ng::from_str(&expand_env(&text)?)
-            .with_context(|| format!("invalid {}", file.display()))?;
+        let config = parse(&expand_env(&text)?).with_context(|| format!("invalid {}", file.display()))?;
 
         let instructions = match &config.instructions {
             Some(text) => text.clone(),
@@ -186,6 +102,19 @@ impl Bundle {
         }
         prompt
     }
+}
+
+/// Parses agent.yaml and rejects unknown keys, so a typo like `modle:`
+/// fails loudly instead of being ignored.
+fn parse(text: &str) -> anyhow::Result<AgentConfig> {
+    let mut unknown = Vec::new();
+    let config = serde_ignored::deserialize(serde_yaml_ng::Deserializer::from_str(text), |path| {
+        unknown.push(path.to_string());
+    })?;
+    if !unknown.is_empty() {
+        bail!("unknown keys: {}", unknown.join(", "));
+    }
+    Ok(config)
 }
 
 /// Replaces `${VAR}` and `${VAR:-default}`. An unset `${VAR}` without a
@@ -253,8 +182,9 @@ mod tests {
 
     #[test]
     fn rejects_unknown_fields() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("agent.yaml"), "modle: openai/gpt-5.5\n").unwrap();
-        assert!(Bundle::load(dir.path()).is_err());
+        let error = parse("modle: openai/gpt-5.5\n").unwrap_err().to_string();
+        assert!(error.contains("modle"), "{error}");
+        let nested = parse("mcpServers:\n  - url: http://x\n    tool: [a]\n").unwrap_err().to_string();
+        assert!(nested.contains("tool"), "{nested}");
     }
 }

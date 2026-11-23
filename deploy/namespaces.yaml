@@ -1,0 +1,15 @@
+# agent-system: the operator. agents: the agents, the console and shared tools.
+# Both enforce the restricted Pod Security Standard.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agent-system
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: agents
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
