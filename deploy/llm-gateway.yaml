@@ -1,0 +1,28 @@
+# llm-gateway: the agentgateway on the host (port 4000), reachable in the
+# cluster as http://llm-gateway.agents:4000/v1. A Service without a selector
+# plus an EndpointSlice with the host's address on the kind Docker network.
+# deploy.sh fills in the address. In-cluster agentgateway replaces this later.
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm-gateway
+  namespace: agents
+spec:
+  ports:
+    - name: http
+      port: 4000
+      targetPort: 4000
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: llm-gateway-host
+  namespace: agents
+  labels:
+    kubernetes.io/service-name: llm-gateway
+addressType: IPv4
+ports:
+  - name: http
+    port: 4000
+endpoints:
+  - addresses: ["${HOST_IP}"]
