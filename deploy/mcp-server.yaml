@@ -1,0 +1,47 @@
+# The sample MCP server (calculate, current_time, get_weather, fetch_url),
+# shared by the agents at http://mcp-server.agents:8081/mcp. Stateless, so it
+# scales to any number of replicas.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mcp-server
+  namespace: agents
+  labels: { app.kubernetes.io/name: mcp-server }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: mcp-server }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: mcp-server }
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: mcp-server
+          image: mcp-server:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            # The Host headers it accepts (DNS rebinding protection).
+            - name: MCP_ALLOWED_HOSTS
+              value: mcp-server,mcp-server:8081,mcp-server.agents,mcp-server.agents:8081,mcp-server.agents.svc.cluster.local,mcp-server.agents.svc.cluster.local:8081
+          ports: [{ name: http, containerPort: 8081 }]
+          readinessProbe: { tcpSocket: { port: 8081 }, periodSeconds: 5 }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mcp-server
+  namespace: agents
+spec:
+  selector: { app.kubernetes.io/name: mcp-server }
+  ports:
+    - { name: http, port: 8081, targetPort: 8081 }

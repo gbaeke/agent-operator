@@ -344,7 +344,9 @@ $("reset").onclick = async () => {
 
 // Console: the agent list, refreshed every 15 seconds. A view is made the
 // first time an agent is opened and kept while the page lives.
+let recheck;
 async function loadAgents() {
+  clearTimeout(recheck);
   let agents;
   try {
     agents = await (await fetch("api/agents")).json();
@@ -366,6 +368,8 @@ async function loadAgents() {
     };
     return button;
   }));
+  // A new agent can be ready a moment before its Service answers; look again soon.
+  if (agents.some((agent) => !agent.healthy)) recheck = setTimeout(loadAgents, 3000);
   if (!current) {
     const wanted = agents.find((agent) => agent.id === location.hash.slice(1) && agent.healthy) ?? agents.find((agent) => agent.healthy);
     if (wanted) [...$("agents").children].find((b) => b.dataset.id === wanted.id).click();
@@ -377,6 +381,13 @@ async function loadAgents() {
 if (MODE === "console") {
   $("title").textContent = "Agent console";
   loadAgents();
+  // The console announces new, changed and deleted agents; the timer keeps
+  // health up to date. A burst of changes reloads the list once.
+  let pending;
+  new EventSource("api/agents/events").onmessage = () => {
+    clearTimeout(pending);
+    pending = setTimeout(loadAgents, 250);
+  };
   setInterval(loadAgents, 15000);
 } else {
   fetch("v1/info").then((r) => r.json()).then((info) => {

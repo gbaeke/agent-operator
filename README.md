@@ -14,7 +14,7 @@ Only `agent.yaml` is required, and the smallest one is a single line: `instructi
 
 A separate **console** gives one web UI for all agents (see [Console](#console)).
 
-This is phase 1 of the plan: the generic runtime and the console. Phase 2 adds a Kubernetes operator. There, an `Agent` custom resource becomes this same folder (a ConfigMap), mounted into this same image, and the console finds agents through the Kubernetes API.
+On Kubernetes, an **operator** turns `Agent` resources into running agents: the same fields as agent.yaml, in a YAML resource you `kubectl apply`. No folder needed there (see [Kubernetes](#kubernetes)).
 
 ## Quick start
 
@@ -174,6 +174,7 @@ Chat events, by `type`:
 |---|---|
 | `GET /` | the UI: the agent list on the left, one chat per agent |
 | `GET /api/agents` | `[{id, healthy, info?, error?}]`: every agent's `/v1/info`, asked in parallel, 3s timeout |
+| `GET /api/agents/events` | an event stream with one `changed` event whenever the list of agents changes |
 | `GET /api/agents/{id}/info` | proxied to the agent's `/v1/info` |
 | `POST /api/agents/{id}/chat` | proxied to `/v1/chat`; the event stream is passed through as it arrives |
 | `POST /api/agents/{id}/reset` | proxied to `/v1/reset` |
@@ -182,6 +183,8 @@ Chat events, by `type`:
 |---|---|
 | `CONSOLE_AGENTS` | `id=url` pairs separated by commas, e.g. `quokka=http://quokka:3000,trip-planner=http://trip-planner:3000` |
 | `CONSOLE_ADDR` | `127.0.0.1:8080`; `0.0.0.0:8080` in the image |
+| `CONSOLE_DISCOVERY` | `static` (default) or `kubernetes`, see [Console in the cluster](#console-in-the-cluster) |
+| `CONSOLE_NAMESPACE` | `agents`: where to watch Agents with `kubernetes` discovery |
 
 ```sh
 CONSOLE_AGENTS=quokka=http://127.0.0.1:3000 cargo run -p agent-console   # http://127.0.0.1:8080
@@ -191,6 +194,90 @@ The UI refreshes the agent list every 15 seconds and marks unreachable agents. E
 
 Agent and console serve the same `ui/index.html`. The console switches it to console mode, and all API paths in it are relative, so it also works behind a path prefix.
 
+## Kubernetes
+
+```sh
+kind/cluster.sh up        # once: the kind cluster `agents` (1 control plane, 2 workers)
+deploy/deploy.sh          # build the images, load them into kind, deploy the platform
+open http://localhost:32000
+```
+
+`deploy.sh` installs the platform, but no agents:
+
+| Namespace | What |
+|---|---|
+| `agent-system` | `agent-operator`: watches `Agent` resources in every namespace |
+| `agents` | `agent-console` (NodePort 32000), `mcp-server`, `llm-gateway` (a Service pointing at the agentgateway on the host, port 4000), and your agents |
+
+Both namespaces enforce the `restricted` Pod Security Standard. Run `deploy/deploy.sh` again after code changes; `deploy/deploy.sh delete` removes everything, including all Agents.
+
+### An agent is a resource
+
+```yaml
+apiVersion: agents.baeke.info/v1alpha1
+kind: Agent
+metadata: { name: trip-planner, namespace: agents }
+spec:
+  # every agent.yaml field
+  name: Trip Planner
+  model: openai/azure-gpt-6-luna
+  instructions: |
+    You are a cheerful, practical trip planner...
+  tools: [planning, skills]
+  mcpServers:
+    - url: http://mcp-server.agents:8081/mcp
+      tools: [get_weather, current_time]
+  examples: ["Make me a packing list for three days in Lisbon."]
+  # plus what only Kubernetes needs
+  skills:
+    - configMap: skill-packing-list    # mounted as skills/packing-list/
+  knowledge:
+    configMap: my-docs                 # mounted as knowledge/
+  replicas: 1                          # sessions are in memory: keep 1 for now
+  env: []                              # e.g. an API key from a Secret
+  resources: {}                        # default: 50m CPU, 64Mi, limit 256Mi
+  image: agent-runtime:dev             # default: the operator's AGENT_IMAGE
+```
+
+```sh
+kubectl -n agents apply -f trip-planner.yaml
+kubectl -n agents get agents            # NAME, MODEL, READY, AGE (-o wide adds URL)
+kubectl -n agents create configmap skill-packing-list --from-file=agents/trip-planner/skills/packing-list/
+kubectl -n agents create configmap my-docs --from-file=docs/
+```
+
+A skill is one ConfigMap whose keys are the skill's files (`SKILL.md` plus any others; ConfigMaps hold no subfolders). A ConfigMap that doesn't exist yet is reported in the Agent's status; the agent starts once it appears. Without `baseUrl`, an agent uses the operator's `DEFAULT_BASE_URL` (here `http://llm-gateway.agents:4000/v1`). `${VAR}` substitution applies to the spec too, as in agent.yaml.
+
+Kubernetes' YAML parser is stricter than the runtime's: quote strings with `?` or `:` inside a `[...]` list, as in `examples` above.
+
+### What the operator does
+
+For each `Agent`, with server-side apply and owner references, so deleting the Agent deletes them:
+
+- ConfigMap `<name>-agent`: the generated agent.yaml (the display name defaults to the resource name);
+- Deployment `<name>`: agent-runtime with one projected volume at `/agent`, in the folder layout the runtime reads (`agent.yaml`, `skills/<name>/...`, `knowledge/...`); non-root, read-only root filesystem, probes on `/readyz` and `/healthz`, 120s for running turns to finish on a rollout;
+- Service `<name>`: port 3000, cluster-internal only.
+
+A hash of everything mounted is in the pod template, so editing the spec or a referenced ConfigMap rolls the pods. `status.ready` turns true when a rollout is complete; `status.message` says what is missing or how far a rollout is; `status.url` is the in-cluster URL the console uses.
+
+| Operator setting | Default |
+|---|---|
+| `AGENT_IMAGE` | `agent-runtime:dev` |
+| `DEFAULT_BASE_URL` | unset; the deployment sets `http://llm-gateway.agents:4000/v1` |
+
+For development, run the operator on your machine against the cluster (scale the in-cluster one to 0 first):
+
+```sh
+kubectl -n agent-system scale deploy/agent-operator --replicas=0
+DEFAULT_BASE_URL=http://llm-gateway.agents:4000/v1 cargo run -p agent-operator
+```
+
+`cargo run -q -p agent-operator -- crd > deploy/crd.yaml` regenerates the CRD after changing the types in `spec/` or `operator/src/crd.rs`; a test fails while it is stale.
+
+### Console in the cluster
+
+With `CONSOLE_DISCOVERY=kubernetes` the console watches the Agents in `CONSOLE_NAMESPACE` (default `agents`) instead of a fixed list, and uses each one's `status.url`. `GET /api/agents/events` sends an event whenever an Agent is added, changed or deleted, so the UI updates its list at once: a `kubectl apply` shows up in the open console within a second or two, and a `kubectl delete` removes it. Agents whose rollout is not finished are listed as not ready.
+
 ## Code map
 
 - `runtime/src/config.rs`: the agent folder, `agent.yaml` and `${VAR}` substitution.
@@ -198,12 +285,15 @@ Agent and console serve the same `ui/index.html`. The console switches it to con
 - `runtime/src/main.rs`: CLI, model connection, agent assembly, axum server, SSE.
 - `runtime/src/tools/`: the built-in tools; `task.rs` holds the subagents.
 - `runtime/src/kb.rs`, `store.rs`: BM25 knowledge base and session storage, from rust-agents.
-- `console/src/main.rs`: the console: agent registry, health checks and the streaming proxy.
+- `console/src/main.rs`: the console: health checks, change events and the streaming proxy; `registry.rs`: static or Kubernetes discovery.
+- `spec/src/lib.rs`: the agent.yaml types, shared by the runtime and the operator.
+- `operator/src/crd.rs`: the `Agent` resource; `reconcile.rs`: what an Agent becomes.
+- `kind/`: the local cluster; `deploy/`: the CRD, platform manifests and `deploy.sh`.
 - `ui/index.html`: the one UI, in agent or console mode.
 - `mcp-server/`: the sample MCP server, copied unchanged from rust-agents.
 - `agents/`: the sample agents.
 
-`cargo test --workspace` tests config loading (including every folder in `agents/`), skills, retrieval, the console's agent list and the calculator.
+`cargo test --workspace` tests config loading (including every folder in `agents/`), skills, retrieval, the console's agent list and discovery, the CRD file, the operator's volume layout and config hash, and the calculator.
 
 ## Known issues
 

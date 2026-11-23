@@ -16,6 +16,8 @@ dependencies = [
  "axum",
  "dotenvy",
  "futures",
+ "k8s-openapi",
+ "kube",
  "reqwest 0.13.5",
  "serde",
  "serde_json",

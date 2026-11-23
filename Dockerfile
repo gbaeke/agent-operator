@@ -6,6 +6,7 @@
 #   docker build --target agent-runtime -t agent-runtime .
 #   docker build --target mcp-server -t mcp-server .
 #   docker build --target agent-console -t agent-console .
+#   docker build --target agent-operator -t agent-operator .
 #
 # agent-runtime holds no agent. Mount an agent folder at /agent, or bake one
 # in with a two-line Dockerfile (see agents/Dockerfile.example).
@@ -17,8 +18,8 @@ WORKDIR /src
 COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --locked -p agent-runtime -p agent-console -p mcp-server \
- && mkdir /out && cp target/release/agent target/release/agent-console target/release/mcp-server /out/
+    cargo build --release --locked -p agent-runtime -p agent-console -p agent-operator -p mcp-server \
+ && mkdir /out && cp target/release/agent target/release/agent-console target/release/agent-operator target/release/mcp-server /out/
 
 FROM gcr.io/distroless/static-debian12:nonroot AS mcp-server
 COPY --from=build /out/mcp-server /mcp-server
@@ -37,3 +38,7 @@ COPY --from=build /out/agent-console /agent-console
 ENV CONSOLE_ADDR=0.0.0.0:8080
 EXPOSE 8080
 ENTRYPOINT ["/agent-console"]
+
+FROM gcr.io/distroless/static-debian12:nonroot AS agent-operator
+COPY --from=build /out/agent-operator /agent-operator
+ENTRYPOINT ["/agent-operator"]

@@ -1,0 +1,74 @@
+# The agent operator: watches Agents in every namespace and applies their
+# ConfigMap, Deployment and Service. Runs in agent-system.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: agent-operator
+  namespace: agent-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: agent-operator
+rules:
+  - apiGroups: [agents.baeke.info]
+    resources: [agents]
+    verbs: [get, list, watch]
+  - apiGroups: [agents.baeke.info]
+    resources: [agents/status]
+    verbs: [get, patch]
+  # configmaps: its own (agent.yaml) and the skill and knowledge ones it reads.
+  - apiGroups: [""]
+    resources: [configmaps, services]
+    verbs: [get, list, watch, create, patch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: agent-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: agent-operator
+subjects:
+  - kind: ServiceAccount
+    name: agent-operator
+    namespace: agent-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-operator
+  namespace: agent-system
+  labels: { app.kubernetes.io/name: agent-operator }
+spec:
+  replicas: 1
+  # One controller at a time: the old pod stops before the new one starts.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app.kubernetes.io/name: agent-operator }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: agent-operator }
+    spec:
+      serviceAccountName: agent-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: operator
+          image: agent-operator:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: AGENT_IMAGE, value: "agent-runtime:dev" }
+            - { name: DEFAULT_BASE_URL, value: "http://llm-gateway.agents:4000/v1" }
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }

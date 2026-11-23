@@ -10,72 +10,33 @@
 //! The browser only talks to the console, so agents need no public address
 //! and no CORS. Chat streams (SSE) are passed through as they arrive.
 //!
-//! Agents come from `CONSOLE_AGENTS`: `id=url` pairs separated by commas,
-//! e.g. `quokka=http://quokka:3000,trip-planner=http://trip-planner:3000`.
+//! Agents come from `CONSOLE_AGENTS` (`id=url` pairs separated by commas),
+//! or with `CONSOLE_DISCOVERY=kubernetes` from the `Agent` resources in a
+//! namespace (see `registry.rs`). `GET /api/agents/events` sends an event
+//! whenever that list changes.
+
+mod registry;
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, bail};
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
 use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::broadcast;
 
-/// Where the agents are. Phase 2 adds discovery of `Agent` resources in Kubernetes.
-enum Registry {
-    Static(Vec<AgentRef>),
-}
-
-#[derive(Clone)]
-struct AgentRef {
-    id: String,
-    url: String,
-}
-
-impl Registry {
-    fn from_env() -> anyhow::Result<Self> {
-        let spec = std::env::var("CONSOLE_AGENTS").unwrap_or_default();
-        Ok(Self::Static(parse_agents(&spec)?))
-    }
-
-    fn agents(&self) -> Vec<AgentRef> {
-        match self {
-            Self::Static(agents) => agents.clone(),
-        }
-    }
-
-    fn get(&self, id: &str) -> Option<AgentRef> {
-        self.agents().into_iter().find(|agent| agent.id == id)
-    }
-}
-
-fn parse_agents(spec: &str) -> anyhow::Result<Vec<AgentRef>> {
-    let mut agents: Vec<AgentRef> = Vec::new();
-    for pair in spec.split(',').map(str::trim).filter(|pair| !pair.is_empty()) {
-        let (id, url) = pair.split_once('=').with_context(|| format!("`{pair}` in CONSOLE_AGENTS is not id=url"))?;
-        let (id, url) = (id.trim(), url.trim().trim_end_matches('/'));
-        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-            bail!("agent id `{id}` may only have letters, digits, - and _");
-        }
-        if !url.starts_with("http://") && !url.starts_with("https://") {
-            bail!("the URL of agent `{id}` must start with http:// or https://");
-        }
-        if agents.iter().any(|agent| agent.id == id) {
-            bail!("agent `{id}` is listed twice in CONSOLE_AGENTS");
-        }
-        agents.push(AgentRef { id: id.to_owned(), url: url.to_owned() });
-    }
-    Ok(agents)
-}
+use registry::Registry;
 
 struct AppState {
     registry: Registry,
+    changes: broadcast::Sender<()>,
     http: reqwest::Client,
 }
 
@@ -95,6 +56,10 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentStatus
     let checks = state.registry.agents().into_iter().map(|agent| {
         let http = state.http.clone();
         async move {
+            // An Agent whose rollout is not done is listed, but not asked.
+            if let Some(reason) = agent.not_ready {
+                return AgentStatus { id: agent.id, healthy: false, info: None, error: Some(reason) };
+            }
             let result = async {
                 let response = http
                     .get(format!("{}/v1/info", agent.url))
@@ -115,6 +80,20 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentStatus
         }
     });
     Json(futures::future::join_all(checks).await)
+}
+
+/// An event each time the list of agents changes, so the UI reloads it at once.
+async fn agent_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let events = futures::stream::unfold(state.changes.subscribe(), |mut changes| async move {
+        match changes.recv().await {
+            // A lagging receiver still learns that something changed.
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some((Ok::<_, std::convert::Infallible>(Event::default().data("changed")), changes))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+    Sse::new(events).keep_alive(KeepAlive::default())
 }
 
 /// Passes one request to the agent's `/v1/{operation}` and streams the answer back.
@@ -166,9 +145,9 @@ async fn main() -> anyhow::Result<()> {
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
-    let registry = Registry::from_env()?;
+    let (registry, changes) = Registry::from_env().await?;
     let agents = registry.agents();
-    if agents.is_empty() {
+    if agents.is_empty() && matches!(registry, Registry::Static(_)) {
         tracing::warn!("no agents: set CONSOLE_AGENTS, e.g. quokka=http://127.0.0.1:3000");
     }
     for agent in &agents {
@@ -177,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         registry,
+        changes,
         http: reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build()?,
     });
     // The shared UI, switched to console mode.
@@ -184,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/", get(move || async move { Html(page) }))
         .route("/api/agents", get(list_agents))
+        .route("/api/agents/events", get(agent_events))
         .route("/api/agents/{id}/info", get(forward_info))
         .route("/api/agents/{id}/{operation}", post(forward))
         .route("/healthz", get(|| async { "ok" }))
@@ -206,26 +187,4 @@ async fn main() -> anyhow::Result<()> {
 
 async fn forward_info(state: State<Arc<AppState>>, Path(id): Path<String>) -> Response {
     forward(state, Path((id, "info".to_owned())), Method::GET, Bytes::new()).await
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_the_agent_list() {
-        let agents = parse_agents(" quokka=http://quokka:3000/ , trip-planner=http://trip:3000,").unwrap();
-        assert_eq!(agents.len(), 2);
-        assert_eq!(agents[0].url, "http://quokka:3000");
-        assert_eq!(agents[1].id, "trip-planner");
-        assert!(parse_agents("").unwrap().is_empty());
-    }
-
-    #[test]
-    fn rejects_bad_entries() {
-        assert!(parse_agents("quokka").is_err());
-        assert!(parse_agents("a b=http://x").is_err());
-        assert!(parse_agents("a=ftp://x").is_err());
-        assert!(parse_agents("a=http://x,a=http://y").is_err());
-    }
 }
