@@ -75,6 +75,7 @@ spec:
             # values for the ${NAME} placeholders in agent specs.
             - { name: AGENT_ENV_MODEL_BASE_URL, value: "http://agentgateway.agents:8080/v1" }
             - { name: AGENT_ENV_MCP_URL, value: "http://agentgateway.agents:8080/mcp" }
+            - { name: AGENT_ENV_LEARN_MCP_URL, value: "http://agentgateway.agents:8080/learn/mcp" }
             # Sessions in Postgres, one schema per agent (deploy/postgres.yaml).
             - { name: SESSION_DATABASE_SECRET, value: agent-sessions }
           resources:
