@@ -45,6 +45,10 @@ pub struct Settings {
     pub image: String,
     /// `baseUrl` for agents that set none (`DEFAULT_BASE_URL`), e.g. a gateway.
     pub default_base_url: Option<String>,
+    /// Environment for every agent pod, from `AGENT_ENV_<NAME>=value`: the
+    /// cluster's values for `${NAME}` placeholders, like compose's
+    /// `environment`. An agent's own `env` wins.
+    pub agent_env: Vec<(String, String)>,
 }
 
 impl Settings {
@@ -52,6 +56,10 @@ impl Settings {
         Self {
             image: std::env::var("AGENT_IMAGE").unwrap_or_else(|_| "agent-runtime:dev".to_owned()),
             default_base_url: std::env::var("DEFAULT_BASE_URL").ok().filter(|url| !url.is_empty()),
+            agent_env: std::env::vars()
+                .filter_map(|(key, value)| Some((key.strip_prefix("AGENT_ENV_")?.to_owned(), value)))
+                .filter(|(key, _)| !key.is_empty())
+                .collect(),
         }
     }
 }
@@ -184,6 +192,7 @@ async fn reconcile(agent: Arc<Agent>, context: Arc<Context>) -> Result<Action, E
     };
     let status = AgentStatus {
         ready,
+        model: Some(resolve(&agent.spec.agent.model, &agent, &context.settings)),
         url: Some(format!("http://{name}.{namespace}:{PORT}")),
         ready_replicas,
         observed_generation: agent.metadata.generation,
@@ -198,6 +207,32 @@ async fn reconcile(agent: Arc<Agent>, context: Arc<Context>) -> Result<Action, E
     }
     // Deployment changes requeue the agent anyway; this is a safety net.
     Ok(Action::requeue(Duration::from_secs(if missing.is_empty() { 300 } else { 30 })))
+}
+
+/// `${VAR}` and `${VAR:-default}` in `text`, resolved from the environment
+/// the agent's pods get: the operator's `AGENT_ENV_*` and the agent's own
+/// literal `env` values. A placeholder that cannot be resolved stays as is.
+fn resolve(text: &str, agent: &Agent, settings: &Settings) -> String {
+    let lookup = |name: &str| {
+        let own = agent.spec.env.iter().rev().find(|var| var.name == name).and_then(|var| var.value.clone());
+        own.or_else(|| settings.agent_env.iter().find(|(key, _)| key == name).map(|(_, value)| value.clone()))
+            .filter(|value| !value.is_empty())
+    };
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("${") {
+        let Some(end) = rest[start..].find('}').map(|end| start + end) else { break };
+        out.push_str(&rest[..start]);
+        let inner = &rest[start + 2..end];
+        let (name, default) = inner.split_once(":-").map_or((inner, None), |(name, default)| (name, Some(default)));
+        match lookup(name).or(default.map(str::to_owned)) {
+            Some(value) => out.push_str(&value),
+            None => out.push_str(&rest[start..=end]),
+        }
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// agent.yaml for the pod: the spec's agent fields, with the resource name
@@ -296,6 +331,12 @@ fn deployment(
         }),
         ..Default::default()
     }];
+    // Later entries win in Kubernetes, so the agent's own env overrides the defaults.
+    env.extend(settings.agent_env.iter().map(|(name, value)| EnvVar {
+        name: name.clone(),
+        value: Some(value.clone()),
+        ..Default::default()
+    }));
     env.extend(agent.spec.env.iter().cloned());
 
     let probe = |path: &str, period: i32| Probe {
@@ -411,7 +452,11 @@ mod tests {
 
     #[test]
     fn mounts_the_agent_folder_layout() {
-        let settings = Settings { image: "agent-runtime:dev".into(), default_base_url: None };
+        let settings = Settings {
+            image: "agent-runtime:dev".into(),
+            default_base_url: None,
+            agent_env: vec![("MCP_URL".into(), "http://mcp-server.agents:8081/mcp".into())],
+        };
         let skills = vec![("sla-credit".to_owned(), config_map("skill-sla-credit", &[("SKILL.md", "x"), ("example.md", "y")]))];
         let knowledge = config_map("quokka-kb", &[("pricing.md", "z")]);
         let deployment = deployment(&agent(), &settings, "quokka-agent", &skills, Some(&knowledge), "hash");
@@ -430,7 +475,23 @@ mod tests {
             ["agent.yaml", "skills/sla-credit/SKILL.md", "skills/sla-credit/example.md", "knowledge/pricing.md"]
         );
         assert_eq!(pod.containers[0].image.as_deref(), Some("agent-runtime:dev"));
+        let env: Vec<&str> = pod.containers[0].env.iter().flatten().map(|var| var.name.as_str()).collect();
+        assert_eq!(env, ["POD_NAME", "MCP_URL"]);
         assert_eq!(deployment.spec.as_ref().unwrap().replicas, Some(2));
+    }
+
+    #[test]
+    fn resolves_placeholders_like_the_pod() {
+        let settings = Settings {
+            image: String::new(),
+            default_base_url: None,
+            agent_env: vec![("AGENT_MODEL".into(), "openai/azure-gpt-6.1-sol".into())],
+        };
+        let agent = agent();
+        assert_eq!(resolve("${AGENT_MODEL:-openai/x}", &agent, &settings), "openai/azure-gpt-6.1-sol");
+        assert_eq!(resolve("${OTHER:-openai/x}", &agent, &settings), "openai/x");
+        assert_eq!(resolve("${UNSET}", &agent, &settings), "${UNSET}");
+        assert_eq!(resolve("anthropic/claude", &agent, &settings), "anthropic/claude");
     }
 
     #[test]

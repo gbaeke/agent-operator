@@ -1,15 +1,19 @@
 //! The agent operator: turns `Agent` resources into running agents.
 //!
 //! ```text
-//! agent-operator         run the controller (in a pod, or locally with your kubeconfig)
-//! agent-operator crd     print the Agent CRD as YAML
+//! agent-operator                      run the controller (in a pod, or locally with your kubeconfig)
+//! agent-operator crd                  print the Agent CRD as YAML
+//! agent-operator render <folder> [--name NAME] [--namespace NS]
+//!                                     print an agent folder as an Agent and its ConfigMaps
 //! ```
 //!
 //! Settings: `AGENT_IMAGE` (default `agent-runtime:dev`), `DEFAULT_BASE_URL`
-//! (the model gateway for agents that set no `baseUrl`), `RUST_LOG`.
+//! (the model gateway for agents that set no `baseUrl`), `AGENT_ENV_<NAME>`
+//! (passed to every agent pod as `<NAME>`), `RUST_LOG`.
 
 mod crd;
 mod reconcile;
+mod render;
 
 use kube::CustomResourceExt;
 
@@ -18,6 +22,23 @@ async fn main() -> anyhow::Result<()> {
     match std::env::args().nth(1).as_deref() {
         Some("crd") => {
             print!("{}", serde_yaml_ng::to_string(&crd::Agent::crd())?);
+            Ok(())
+        }
+        Some("render") => {
+            let mut args = std::env::args().skip(2);
+            let (mut dir, mut name, mut namespace) = (None, None, "agents".to_owned());
+            while let Some(arg) = args.next() {
+                match arg.as_str() {
+                    "--name" => name = Some(args.next().ok_or_else(|| anyhow::anyhow!("--name needs a value"))?),
+                    "--namespace" | "-n" => {
+                        namespace = args.next().ok_or_else(|| anyhow::anyhow!("--namespace needs a value"))?
+                    }
+                    flag if flag.starts_with('-') => anyhow::bail!("unknown option {flag}"),
+                    path => dir = Some(std::path::PathBuf::from(path)),
+                }
+            }
+            let dir = dir.ok_or_else(|| anyhow::anyhow!("usage: agent-operator render <folder> [--name NAME] [--namespace NS]"))?;
+            print!("{}", render::render(&dir, name.as_deref(), &namespace)?.to_yaml()?);
             Ok(())
         }
         None | Some("run") => {
@@ -30,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
             let client = kube::Client::try_default().await?;
             reconcile::run(client, reconcile::Settings::from_env()).await
         }
-        Some(other) => anyhow::bail!("unknown command `{other}`; use `crd` or no command"),
+        Some(other) => anyhow::bail!("unknown command `{other}`; use `crd`, `render` or no command"),
     }
 }
 
@@ -66,7 +87,8 @@ mod tests {
             "pirate",
             serde_json::from_value(serde_json::json!({ "instructions": "Talk like a pirate." })).unwrap(),
         );
-        let settings = reconcile::Settings { image: "x".into(), default_base_url: Some("http://gw/v1".into()) };
+        let settings =
+            reconcile::Settings { image: "x".into(), default_base_url: Some("http://gw/v1".into()), agent_env: Vec::new() };
         let yaml = reconcile::render(&agent, &settings).unwrap();
         assert!(yaml.contains("name: pirate"), "{yaml}");
         assert!(yaml.contains("baseUrl: http://gw/v1"), "{yaml}");

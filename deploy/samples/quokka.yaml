@@ -1,0 +1,357 @@
+apiVersion: v1
+kind: ConfigMap
+data:
+  SKILL.md: |
+    ---
+    name: customer-email
+    description: Write an email to a customer, for example about an incident or a credit.
+    ---
+
+    # Customer email
+
+    - Address the customer's contact by name if the knowledge base has it; else "Dear <company> team".
+    - First paragraph: what happened, in one or two plain sentences, with the date. No internal jargon or blame.
+    - Second paragraph: what it means for them (impact, credit amount and how it is applied).
+    - Third paragraph: what Quokka does to prevent it, from the postmortem's action items.
+    - Close with "Kind regards," and "The Quokka Robotics Customer Success team".
+    - Under 200 words. Save each email as `emails/<customer-slug>.md`.
+metadata:
+  labels:
+    app.kubernetes.io/part-of: quokka
+  name: quokka-skill-customer-email
+  namespace: agents
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+  SKILL.md: |
+    ---
+    name: sla-credit
+    description: Work out the SLA service credit a customer is owed after an outage.
+    ---
+
+    # SLA credit
+
+    1. Find the outage in the incident postmortems: its start, end and which customers it hit.
+    2. Find the customer's plan (Starter, Pro or Enterprise), fleet size and monthly QFC fee per unit, and the credit table, in pricing-and-sla.md.
+    3. Monthly uptime = (minutes in the month − outage minutes) / minutes in the month. Use calculate. pricing-and-sla.md counts every month as 30 days (43,200 minutes).
+    4. Look up the credit percentage for that uptime in the column of the customer's plan.
+    5. Credit = percentage × units × monthly QFC fee per unit. Use calculate.
+    6. Answer with the uptime (two decimals), the percentage, the amount in euros and each source document.
+
+    Use `worked-example.md` (call load_skill with file) to check your steps.
+  worked-example.md: |
+    # Worked example (hypothetical figures)
+
+    A Pro customer with 50 units at an example QFC fee of EUR 100 per unit has a 10-hour outage
+    (600 minutes). A month always counts as 43,200 minutes:
+
+    - uptime = (43200 − 600) / 43200 = 98.61%
+    - Pro column, "98.0% to below 99.0%": 20%
+    - credit = 20% × 50 × EUR 100 = EUR 1,000
+metadata:
+  labels:
+    app.kubernetes.io/part-of: quokka
+  name: quokka-skill-sla-credit
+  namespace: agents
+---
+apiVersion: v1
+kind: ConfigMap
+data:
+  engineering-onboarding.md: |
+    # Engineering Onboarding Guide
+
+    Welcome to Quokka Robotics engineering. This guide covers your first two weeks.
+
+    ## Week 1
+
+    - Day 1: laptop pickup at the IT desk (Ghent office, 2nd floor), SSO setup, security training.
+    - Day 2: architecture overview session with your onboarding buddy. Read the QFC design docs in the wiki.
+    - Day 3-5: ship a small change. Every new engineer merges at least one pull request in week 1, usually a documentation or test fix.
+
+    ## Week 2
+
+    - Shadow an on-call shift (you are not paged yet).
+    - Attend the weekly fleet review on Thursday at 14:00 CET.
+    - Complete the robot safety certification (2-hour course, required before touching physical robots in the test lab).
+
+    ## Tooling
+
+    - Code: GitHub, trunk-based development, every PR needs one review and green CI.
+    - Languages: the fleet controller is written in Rust; robot firmware in C++ and Rust; data tooling in Python.
+    - Deploys: QFC deploys to production every weekday at 11:00 CET via the release train. Hotfixes require an incident commander's approval.
+    - Observability: metrics and traces in Grafana; logs in Loki; alerts route through the central alerting system (since April 2026).
+
+    ## On-call
+
+    Engineers join the on-call rotation after 8 weeks. Rotations are one week long, Monday 09:00 to Monday 09:00 CET. On-call compensation is EUR 350 per week plus EUR 60 per hour for incidents handled outside business hours.
+  expense-policy.md: |
+    # Travel and Expense Policy
+
+    Applies to all Quokka Robotics employees. Effective 1 January 2026.
+
+    ## Approval thresholds
+
+    - Up to EUR 250 per expense: no pre-approval needed, submit receipt within 30 days.
+    - EUR 250 to EUR 2,000: approval by your direct manager before the spend.
+    - Above EUR 2,000: approval by your department head and Finance before the spend.
+    - Any expense submitted later than 60 days after it was incurred is not reimbursed.
+
+    ## Travel
+
+    - Trains are preferred over flights for trips under 5 hours door to door.
+    - Economy class for flights under 6 hours; premium economy allowed for longer flights.
+    - Hotels: up to EUR 180 per night in standard cities, EUR 260 per night in Tier 1 cities (London, Paris, Zurich, New York, San Francisco, Tokyo).
+    - Mileage for private cars: EUR 0.43 per km.
+
+    ## Meals and per diem
+
+    Meals while travelling are reimbursed up to the daily per diem for the city:
+
+    | City category | Daily meal limit | Single meal limit |
+    |---------------|------------------|-------------------|
+    | Standard      | EUR 60           | EUR 35            |
+    | Tier 1        | EUR 95           | EUR 55            |
+
+    Customer entertainment (a meal with a customer present) follows different rules: up to EUR 90 per person including the customer, maximum four Quokka employees per customer meal, and the customer's name and company must be on the claim. Alcohol is reimbursed only during customer entertainment.
+
+    ## Not reimbursed
+
+    Traffic fines, minibar, in-flight Wi-Fi on flights under 3 hours, personal entertainment, and lost-item replacements.
+  firmware-release-notes.md: |
+    # Robot Firmware Release Notes
+
+    ## 4.2.0 (2026-09-02)
+
+    - Wombat (QR-1): picking speed improved by 11% through better arm trajectory planning.
+    - Numbat (QR-3): adds support for half-pallets (600 x 800 mm).
+    - All robots: battery health reporting via the `GET /robots/{id}` endpoint.
+    - Known issue: Platypus (QR-5) RFID range drops to 4 m when the thermal camera is active. Workaround: disable thermal during inventory scans. Fix planned for 4.2.1.
+
+    ## 4.1.3 (2026-06-17)
+
+    - Fixes a rare case where Wombat robots parked in charging lanes after a command-channel loss, blocking other robots. Found during the 18 March 2026 outage.
+    - Improves reconnect behaviour: robots now retry the command channel every 10 seconds instead of every 60 seconds.
+
+    ## 4.1.0 (2026-03-03)
+
+    - New "safe park" mode: on loss of the command channel robots finish their current task and park in designated zones.
+    - Platypus (QR-5): automatic return-to-dock threshold raised from 15% to 20% battery.
+
+    ## Support policy
+
+    The two most recent minor versions are supported. As of September 2026 that is 4.2.x and 4.1.x. Customers on 4.0.x or older must upgrade to receive support for P2-P4 issues; P1 issues are always supported.
+  fleet-api-reference.md: |
+    # Fleet Controller API Reference (v3)
+
+    Base URL: `https://api.quokka-robotics.example/v3`. All requests require a bearer token from the customer admin console.
+
+    ## Rate limits
+
+    | Plan       | Requests per minute | Burst |
+    |------------|---------------------|-------|
+    | Starter    | 120                 | 20    |
+    | Pro        | 1,200               | 200   |
+    | Enterprise | 6,000               | 1,000 |
+
+    Exceeding the limit returns HTTP 429 with a `Retry-After` header in seconds.
+
+    ## Endpoints
+
+    - `GET /robots`: list robots with status (`idle`, `working`, `charging`, `parked`, `fault`).
+    - `GET /robots/{id}`: one robot, including battery level and current task.
+    - `POST /tasks`: create a task. Body: `{"type": "pick" | "move_pallet" | "scan", "robot_id": optional, "priority": 1-5}`. If `robot_id` is omitted the scheduler assigns one.
+    - `DELETE /tasks/{id}`: cancel a task that has not started. Running tasks cannot be cancelled through the API; use `POST /robots/{id}/stop`.
+    - `POST /robots/{id}/stop`: emergency stop. The robot halts within 300 ms and needs a manual reset on site.
+    - `GET /fleet/health`: aggregated fleet health and the current SLA month's measured uptime.
+
+    ## Error codes
+
+    | Code | Meaning |
+    |------|---------|
+    | 400  | Invalid request body |
+    | 401  | Missing or expired token |
+    | 403  | Token lacks the required scope (`fleet:read`, `fleet:write`, `fleet:stop`) |
+    | 409  | Robot is busy or in fault state |
+    | 429  | Rate limit exceeded |
+    | 503  | Fleet controller degraded; retry with exponential backoff |
+
+    ## Webhooks
+
+    Register a webhook to receive `robot.fault`, `task.completed` and `fleet.degraded` events. Webhooks are retried for up to 24 hours with exponential backoff and signed with an HMAC-SHA256 signature in the `X-Quokka-Signature` header.
+  incident-2026-03-18-postmortem.md: |
+    # Postmortem: Fleet Controller outage, 18 March 2026
+
+    Status: final. Severity: P1. Author: Site Reliability team.
+
+    ## Summary
+
+    On 18 March 2026 the Quokka Fleet Controller (QFC) in the eu-west region was unavailable for 4 hours and 12 minutes, from 06:41 to 10:53 CET. Robots in affected fleets finished their current task and then parked safely, as designed. No safety incidents occurred.
+
+    This was unplanned downtime and was not announced in advance. There was no other downtime in eu-west during March 2026.
+
+    ## Customer impact
+
+    All customers whose fleets are homed in eu-west were affected. The largest affected customers were:
+
+    | Customer               | Plan       | Robots in fleet |
+    |------------------------|------------|-----------------|
+    | Bluefin Logistics      | Enterprise | 140 (QR-1)      |
+    | Moerbei Foods          | Pro        | 32 (QR-1), 6 (QR-3) |
+    | Tarnwick Distribution  | RaaS (Pro included) | 18 (QR-1) |
+    | Sablewood Pharma       | Starter    | 4 (QR-5)        |
+
+    Bluefin Logistics reported an estimated 2,300 delayed orders.
+
+    ## Root cause
+
+    The TLS certificate used by the robot command channel's internal load balancer expired at 06:41. Certificate renewal had been automated, but the renewal job had been silently failing since a secrets-store migration on 2 February 2026 because it still referenced the old secrets path. The alert for failing renewals routed to a decommissioned pager channel.
+
+    ## Timeline (CET)
+
+    - 06:41 Certificate expires; robots lose the command channel and park.
+    - 06:58 First customer ticket (Moerbei Foods).
+    - 07:20 On-call engineer paged via customer escalation, not via monitoring.
+    - 08:35 Root cause identified.
+    - 09:50 New certificate issued manually; rollout blocked by a cached chain on load balancer nodes.
+    - 10:53 All load balancer nodes restarted; service fully restored.
+
+    ## Action items
+
+    1. Move certificate expiry monitoring to the central alerting system with a 21-day warning (owner: SRE, due 2026-04-15, done).
+    2. Audit all alert routes for decommissioned channels (owner: SRE, due 2026-04-30, done).
+    3. Add a synthetic check on the robot command channel every 60 seconds (owner: Platform, due 2026-05-31, done).
+    4. Proactively notify affected customers about their SLA credit eligibility (owner: Customer Success, due 2026-04-10).
+  pricing-and-sla.md: |
+    # Quokka Fleet Controller Plans and Service Level Agreement
+
+    Every customer runs their robots through the Quokka Fleet Controller (QFC). QFC is sold in three plans.
+
+    ## Plans
+
+    | Plan       | Price per robot per month | Monthly uptime commitment | Support response time (P1) |
+    |------------|---------------------------|---------------------------|----------------------------|
+    | Starter    | EUR 49                    | 99.5%                     | 8 business hours           |
+    | Pro        | EUR 99                    | 99.9%                     | 1 hour, 24/7               |
+    | Enterprise | EUR 179                   | 99.95%                    | 15 minutes, 24/7, named TAM |
+
+    RaaS customers get the Pro plan included in their monthly fee. They can upgrade to Enterprise for EUR 80 per robot per month extra.
+
+    ## How uptime is measured
+
+    Uptime is measured per calendar month as the percentage of minutes in which the QFC API and the robot command channel were both available. Planned maintenance announced at least 72 hours in advance does not count as downtime. A month is counted as 30 days (43,200 minutes) for SLA purposes, regardless of its actual length.
+
+    ## Service credits
+
+    If uptime falls below the plan's commitment, the customer is entitled to a service credit on that month's QFC fee:
+
+    | Monthly uptime achieved           | Credit (Starter) | Credit (Pro) | Credit (Enterprise) |
+    |-----------------------------------|------------------|--------------|---------------------|
+    | Below commitment but at least 99.0% | 5%             | 10%          | 15%                 |
+    | 98.0% to below 99.0%              | 10%              | 20%          | 30%                 |
+    | 95.0% to below 98.0%              | 15%              | 30%          | 50%                 |
+    | Below 95.0%                       | 25%              | 50%          | 100%                |
+
+    Credits are capped at 100% of the monthly QFC fee and must be claimed by the customer within 30 days after the end of the affected month. Credits are applied to the next invoice and are never paid out in cash. Credits apply to the QFC fee only; for RaaS customers the QFC share of the monthly fee is fixed at EUR 99 per robot.
+  product-catalog.md: |
+    # Quokka Robotics Product Catalog (2026)
+
+    Quokka Robotics is a fictional company that builds autonomous robots for warehouses and industrial inspection. All products are managed through the Quokka Fleet Controller (QFC), a cloud service.
+
+    ## QR-1 "Wombat" Warehouse Picker
+
+    The Wombat is a wheeled picking robot for shelving up to 2.4 m high.
+
+    - Payload: 25 kg per pick, 120 kg tote capacity
+    - Speed: 1.8 m/s loaded, 2.5 m/s empty
+    - Battery: 6.5 hours of continuous operation, 70 minute fast charge to 80%
+    - Navigation: lidar + ceiling fiducials, no floor markings required
+    - List price: EUR 38,500 per unit, or EUR 1,150 per unit per month on Robot-as-a-Service (RaaS)
+    - Minimum fleet size for RaaS: 5 units
+
+    ## QR-3 "Numbat" Pallet Mover
+
+    The Numbat moves full pallets between docks and racking.
+
+    - Payload: 1,200 kg
+    - Speed: 1.2 m/s loaded
+    - Battery: 9 hours, swappable battery packs (swap takes 3 minutes)
+    - Safety: certified to ISO 3691-4
+    - List price: EUR 64,000 per unit, or EUR 1,900 per unit per month on RaaS
+
+    ## QR-5 "Platypus" Inspection Drone
+
+    The Platypus is an indoor drone for inventory counting and infrastructure inspection.
+
+    - Flight time: 28 minutes, automatic return-to-dock at 20% battery
+    - Sensors: 48 MP camera, thermal camera, RFID reader (range 6 m)
+    - Inventory scan rate: up to 9,000 pallet locations per hour
+    - List price: EUR 22,000 per unit, or EUR 690 per unit per month on RaaS
+    - Not certified for outdoor use; maximum wind tolerance is irrelevant indoors but the drone refuses to launch above 35 degrees Celsius ambient temperature.
+
+    ## Volume discounts
+
+    | Units ordered | Discount on list price |
+    |---------------|------------------------|
+    | 1-9           | 0%                     |
+    | 10-24         | 8%                     |
+    | 25-49         | 12%                    |
+    | 50+           | 15% (requires VP Sales approval) |
+
+    Discounts apply to purchases only, not to RaaS monthly fees. Discounts of more than 15% are never allowed without CFO sign-off.
+metadata:
+  labels:
+    app.kubernetes.io/part-of: quokka
+  name: quokka-knowledge
+  namespace: agents
+---
+apiVersion: agents.baeke.info/v1alpha1
+kind: Agent
+metadata:
+  name: quokka
+  namespace: agents
+spec:
+  name: Quokka Assistant
+  description: Answers questions about Quokka Robotics from the internal knowledge base, with calculations, live data and parallel research.
+  model: ${AGENT_MODEL:-openai/azure-gpt-6-luna}
+  baseUrl: ${MODEL_BASE_URL:-http://localhost:4000/v1}
+  maxTokens: 8192
+  maxTurns: 40
+  instructions: |
+    You are Quokka Assistant, an expert assistant for the employees of Quokka Robotics.
+
+    How to work:
+    - For any request that needs three or more steps, write a plan with write_todos first, and tick items off as you finish them.
+    - Search the knowledge base with several phrasings, and read full documents when you need tables or exact figures.
+    - Delegate independent research questions to the researcher subagent with task. Launch several in the same turn when a request has independent parts.
+    - Never do arithmetic in your head; always use calculate.
+
+    Rules:
+    - Ground every company fact in the knowledge base and cite the document name, e.g. (pricing-and-sla.md).
+    - If the knowledge base does not answer the question, say so instead of guessing.
+    - Keep the chat answer concise; put long material (reports, emails, comparisons) in a workspace file and mention it.
+  mcpServers:
+  - url: ${MCP_URL:-http://127.0.0.1:8081/mcp}
+  subagents:
+  - name: researcher
+    description: Researches one self-contained question in the knowledge base and returns a sourced report.
+    instructions: |
+      You are a research subagent. You get one self-contained research task. Use search_knowledge_base
+      (several times, with different keywords), read_document for full context, and the calculate tool
+      for any arithmetic. Do not guess: every fact in your answer must come from a document or a tool
+      result. Finish with a concise report: the answer, the key facts with their source documents, and
+      anything you could not find.
+    maxTurns: 15
+  examples:
+  - Bluefin Logistics was hit by the March outage. How much SLA credit are they owed in euros? Show your working.
+  - Draft an email to each customer affected by the 18 March outage explaining the SLA credit they are owed. Research the customers in parallel and save each email as a file.
+  - We want 30 Wombats and 10 Numbats. Compare buying versus RaaS over 3 years, including the fleet controller fees, and write the comparison to a file.
+  - I'm taking a customer to dinner in Paris with two colleagues. What's the most we can spend, and what's the weather in Paris right now?
+  skills:
+  - configMap: quokka-skill-customer-email
+    name: customer-email
+  - configMap: quokka-skill-sla-credit
+    name: sla-credit
+  knowledge:
+    configMap: quokka-knowledge
+  replicas: 1

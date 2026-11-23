@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
     namespaced,
     status = "AgentStatus",
     shortname = "ag",
-    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".spec.model"}"#,
+    printcolumn = r#"{"name":"Model","type":"string","jsonPath":".status.model"}"#,
     printcolumn = r#"{"name":"Ready","type":"boolean","jsonPath":".status.ready"}"#,
     printcolumn = r#"{"name":"URL","type":"string","jsonPath":".status.url","priority":1}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
@@ -75,6 +75,9 @@ pub struct ConfigMapRef {
 pub struct AgentStatus {
     /// Whether every pod of the agent is ready.
     pub ready: bool,
+    /// The model the agent uses, with `${VAR}` placeholders resolved as in its pods.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// The agent's API inside the cluster, e.g. `http://trip-planner.agents:3000`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,

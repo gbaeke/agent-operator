@@ -37,6 +37,7 @@ dependencies = [
  "kube",
  "schemars 1.2.3",
  "serde",
+ "serde_ignored",
  "serde_json",
  "serde_yaml_ng",
  "thiserror",

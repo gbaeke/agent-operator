@@ -202,7 +202,14 @@ deploy/deploy.sh          # build the images, load them into kind, deploy the pl
 open http://localhost:32000
 ```
 
-`deploy.sh` installs the platform, but no agents:
+`deploy.sh` installs the platform, but no agents. The samples are ready to apply:
+
+```sh
+kubectl apply -f deploy/samples/            # quokka, trip-planner, pirate
+kubectl -n agents get agents
+```
+
+The platform:
 
 | Namespace | What |
 |---|---|
@@ -250,6 +257,17 @@ A skill is one ConfigMap whose keys are the skill's files (`SKILL.md` plus any o
 
 Kubernetes' YAML parser is stricter than the runtime's: quote strings with `?` or `:` inside a `[...]` list, as in `examples` above.
 
+### From a folder to a resource
+
+Developed an agent as a folder (with `cargo run` or Docker)? `render` turns it into an Agent plus its ConfigMaps, with no retyping:
+
+```sh
+cargo run -q -p agent-operator -- render agents/my-agent | kubectl apply -f -
+cargo run -q -p agent-operator -- render agents/my-agent --name other --namespace team-a > my-agent.yaml
+```
+
+Each skill becomes a ConfigMap `<agent>-skill-<skill>`, `knowledge/*.md` becomes `<agent>-knowledge`, and `instructions.md` moves into `instructions`. `${VAR}` placeholders are kept: in the cluster the operator's `AGENT_ENV_*` settings provide them (below), as compose does for containers, so the same folder works in both. `deploy/samples/` is rendered from `agents/` by `deploy/samples.sh`; a test fails when a sample is stale.
+
 ### What the operator does
 
 For each `Agent`, with server-side apply and owner references, so deleting the Agent deletes them:
@@ -258,12 +276,13 @@ For each `Agent`, with server-side apply and owner references, so deleting the A
 - Deployment `<name>`: agent-runtime with one projected volume at `/agent`, in the folder layout the runtime reads (`agent.yaml`, `skills/<name>/...`, `knowledge/...`); non-root, read-only root filesystem, probes on `/readyz` and `/healthz`, 120s for running turns to finish on a rollout;
 - Service `<name>`: port 3000, cluster-internal only.
 
-A hash of everything mounted is in the pod template, so editing the spec or a referenced ConfigMap rolls the pods. `status.ready` turns true when a rollout is complete; `status.message` says what is missing or how far a rollout is; `status.url` is the in-cluster URL the console uses.
+A hash of everything mounted is in the pod template, so editing the spec or a referenced ConfigMap rolls the pods. `status.ready` turns true when a rollout is complete; `status.message` says what is missing or how far a rollout is; `status.url` is the in-cluster URL the console uses; `status.model` is the model with its placeholders resolved, as the pods will see it (the MODEL column).
 
 | Operator setting | Default |
 |---|---|
 | `AGENT_IMAGE` | `agent-runtime:dev` |
 | `DEFAULT_BASE_URL` | unset; the deployment sets `http://llm-gateway.agents:4000/v1` |
+| `AGENT_ENV_<NAME>` | passed to every agent pod as `<NAME>`; an Agent's own `env` wins. The deployment sets `MODEL_BASE_URL` (the gateway) and `MCP_URL` (the shared MCP server) |
 
 For development, run the operator on your machine against the cluster (scale the in-cluster one to 0 first):
 
@@ -287,13 +306,13 @@ With `CONSOLE_DISCOVERY=kubernetes` the console watches the Agents in `CONSOLE_N
 - `runtime/src/kb.rs`, `store.rs`: BM25 knowledge base and session storage, from rust-agents.
 - `console/src/main.rs`: the console: health checks, change events and the streaming proxy; `registry.rs`: static or Kubernetes discovery.
 - `spec/src/lib.rs`: the agent.yaml types, shared by the runtime and the operator.
-- `operator/src/crd.rs`: the `Agent` resource; `reconcile.rs`: what an Agent becomes.
-- `kind/`: the local cluster; `deploy/`: the CRD, platform manifests and `deploy.sh`.
+- `operator/src/crd.rs`: the `Agent` resource; `reconcile.rs`: what an Agent becomes; `render.rs`: folder to resource.
+- `kind/`: the local cluster; `deploy/`: the CRD, platform manifests, `deploy.sh` and the rendered `samples/`.
 - `ui/index.html`: the one UI, in agent or console mode.
 - `mcp-server/`: the sample MCP server, copied unchanged from rust-agents.
 - `agents/`: the sample agents.
 
-`cargo test --workspace` tests config loading (including every folder in `agents/`), skills, retrieval, the console's agent list and discovery, the CRD file, the operator's volume layout and config hash, and the calculator.
+`cargo test --workspace` tests config loading (including every folder in `agents/`), skills, retrieval, the console's agent list and discovery, the CRD file, the operator's volume layout, config hash and placeholder resolution, rendering and the sample files, and the calculator.
 
 ## Known issues
 

@@ -13,7 +13,7 @@ spec:
   scope: Namespaced
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.model
+    - jsonPath: .status.model
       name: Model
       type: string
     - jsonPath: .status.ready
@@ -323,6 +323,10 @@ spec:
             properties:
               message:
                 description: Why the agent is not ready, if it is not.
+                nullable: true
+                type: string
+              model:
+                description: The model the agent uses, with `${VAR}` placeholders resolved as in its pods.
                 nullable: true
                 type: string
               observedGeneration:

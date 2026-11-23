@@ -65,6 +65,10 @@ spec:
           env:
             - { name: AGENT_IMAGE, value: "agent-runtime:dev" }
             - { name: DEFAULT_BASE_URL, value: "http://llm-gateway.agents:4000/v1" }
+            # AGENT_ENV_<NAME> reaches every agent pod as <NAME>: the cluster's
+            # values for the ${NAME} placeholders in agent specs.
+            - { name: AGENT_ENV_MODEL_BASE_URL, value: "http://llm-gateway.agents:4000/v1" }
+            - { name: AGENT_ENV_MCP_URL, value: "http://mcp-server.agents:8081/mcp" }
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 128Mi }
