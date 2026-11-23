@@ -24,6 +24,10 @@ rules:
   - apiGroups: [apps]
     resources: [deployments]
     verbs: [get, list, watch, create, patch]
+  # The gateway's models, to check that each agent's model is offered.
+  - apiGroups: [agentgateway.dev]
+    resources: [agentgatewaymodels]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -64,11 +68,15 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - { name: AGENT_IMAGE, value: "agent-runtime:dev" }
-            - { name: DEFAULT_BASE_URL, value: "http://llm-gateway.agents:4000/v1" }
+            # The in-cluster agentgateway: models on /v1, the MCP server on /mcp.
+            - { name: DEFAULT_BASE_URL, value: "http://agentgateway.agents:8080/v1" }
+            - { name: GATEWAY_MODELS_NAMESPACE, value: agents }
             # AGENT_ENV_<NAME> reaches every agent pod as <NAME>: the cluster's
             # values for the ${NAME} placeholders in agent specs.
-            - { name: AGENT_ENV_MODEL_BASE_URL, value: "http://llm-gateway.agents:4000/v1" }
-            - { name: AGENT_ENV_MCP_URL, value: "http://mcp-server.agents:8081/mcp" }
+            - { name: AGENT_ENV_MODEL_BASE_URL, value: "http://agentgateway.agents:8080/v1" }
+            - { name: AGENT_ENV_MCP_URL, value: "http://agentgateway.agents:8080/mcp" }
+            # Sessions in Postgres, one schema per agent (deploy/postgres.yaml).
+            - { name: SESSION_DATABASE_SECRET, value: agent-sessions }
           resources:
             requests: { cpu: 20m, memory: 32Mi }
             limits: { memory: 128Mi }

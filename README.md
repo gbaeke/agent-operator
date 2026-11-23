@@ -133,6 +133,7 @@ These are deployment settings, not part of what makes an agent unique, so they s
 | `AGENT_DIR` | the CLI argument, else `.`; `/agent` in the image |
 | `AGENT_ADDR` | `127.0.0.1:3000`; `0.0.0.0:3000` in the image |
 | `DATABASE_URL` | unset: sessions in memory |
+| `DATABASE_SCHEMA` | unset: the database's default schema. Set, the tables live in this schema, made at startup |
 | `SESSION_TTL_DAYS` | `7`; `0` keeps sessions forever |
 | `RUST_LOG` | `info` |
 
@@ -196,27 +197,34 @@ Agent and console serve the same `ui/index.html`. The console switches it to con
 
 ## Kubernetes
 
+From nothing to three running agents:
+
 ```sh
-kind/cluster.sh up        # once: the kind cluster `agents` (1 control plane, 2 workers)
-deploy/deploy.sh          # build the images, load them into kind, deploy the platform
+kind/cluster.sh up                      # the kind cluster `agents` (1 control plane, 2 workers)
+deploy/deploy.sh                        # build, load into kind, deploy the platform
+kubectl apply -f deploy/samples/        # three agents
 open http://localhost:32000
 ```
 
-`deploy.sh` installs the platform, but no agents. The samples are ready to apply:
+You need Docker, kind, kubectl and helm (`kind/cluster.sh install` gets the last three), Python 3 with PyYAML, openssl, and a standalone agentgateway config with your Azure models (`~/.config/agentgateway/config.yaml`, or set `AGENTGATEWAY_CONFIG`): `deploy.sh` copies its Azure models and keys into the cluster, see [Models](#models).
 
-```sh
-kubectl apply -f deploy/samples/            # quokka, trip-planner, pirate
-kubectl -n agents get agents
-```
-
-The platform:
+`deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner and pirate. The platform:
 
 | Namespace | What |
 |---|---|
 | `agent-system` | `agent-operator`: watches `Agent` resources in every namespace |
-| `agents` | `agent-console` (NodePort 32000), `mcp-server`, `llm-gateway` (a Service pointing at the agentgateway on the host, port 4000), and your agents |
+| `agentgateway-system` | the agentgateway controller (installed by `deploy.sh` if missing) |
+| `agents` | `agent-console` (NodePort 32000), `agentgateway` (the proxy for models and MCP), `mcp-server`, `postgres` (sessions), and your agents |
 
-Both namespaces enforce the `restricted` Pod Security Standard. Run `deploy/deploy.sh` again after code changes; `deploy/deploy.sh delete` removes everything, including all Agents.
+```
+console ──► agents ──► agentgateway ──► Azure models
+                 │           └────────► mcp-server ──► the web (weather, fetch_url)
+                 └───► postgres (sessions, a schema per agent)
+```
+
+Both namespaces enforce the `restricted` Pod Security Standard. NetworkPolicies (`deploy/network-policies.yaml`) enforce the picture above: agents may only reach the gateway, Postgres and DNS; only the console may call an agent; only the gateway reaches the MCP server; only agents reach Postgres and the gateway.
+
+Run `deploy/deploy.sh` again after code changes; `deploy/deploy.sh delete` removes everything, including all Agents and the session database.
 
 ### An agent is a resource
 
@@ -232,7 +240,7 @@ spec:
     You are a cheerful, practical trip planner...
   tools: [planning, skills]
   mcpServers:
-    - url: http://mcp-server.agents:8081/mcp
+    - url: http://agentgateway.agents:8080/mcp   # the MCP server, through the gateway
       tools: [get_weather, current_time]
   examples: ["Make me a packing list for three days in Lisbon."]
   # plus what only Kubernetes needs
@@ -240,7 +248,7 @@ spec:
     - configMap: skill-packing-list    # mounted as skills/packing-list/
   knowledge:
     configMap: my-docs                 # mounted as knowledge/
-  replicas: 1                          # sessions are in memory: keep 1 for now
+  replicas: 1                          # any number: sessions are in Postgres
   env: []                              # e.g. an API key from a Secret
   resources: {}                        # default: 50m CPU, 64Mi, limit 256Mi
   image: agent-runtime:dev             # default: the operator's AGENT_IMAGE
@@ -253,9 +261,37 @@ kubectl -n agents create configmap skill-packing-list --from-file=agents/trip-pl
 kubectl -n agents create configmap my-docs --from-file=docs/
 ```
 
-A skill is one ConfigMap whose keys are the skill's files (`SKILL.md` plus any others; ConfigMaps hold no subfolders). A ConfigMap that doesn't exist yet is reported in the Agent's status; the agent starts once it appears. Without `baseUrl`, an agent uses the operator's `DEFAULT_BASE_URL` (here `http://llm-gateway.agents:4000/v1`). `${VAR}` substitution applies to the spec too, as in agent.yaml.
+A skill is one ConfigMap whose keys are the skill's files (`SKILL.md` plus any others; ConfigMaps hold no subfolders). A ConfigMap that doesn't exist yet is reported in the Agent's status; the agent starts once it appears. Without `baseUrl`, an agent uses the operator's `DEFAULT_BASE_URL`, the in-cluster gateway. `${VAR}` substitution applies to the spec too, as in agent.yaml.
 
 Kubernetes' YAML parser is stricter than the runtime's: quote strings with `?` or `:` inside a `[...]` list, as in `examples` above.
+
+### Models
+
+Models are declared once, on the gateway, and shared by every agent: an agent only names one (`model: openai/azure-gpt-6-luna`; the `openai/` part picks the protocol). The gateway holds the keys, so agents have none.
+
+`deploy.sh` (or `deploy/deploy.sh models`, to refresh) runs `deploy/gateway/models-from-host.py`, which reads the Azure models of your standalone agentgateway config and applies one `AgentgatewayModel` per chat model plus the Secret `gateway-model-keys`. The keys go straight from that file into the Secret; they are never printed, written to a file or committed. To add a model by hand:
+
+```yaml
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayModel
+metadata: { name: gpt-6-luna, namespace: agents }    # the Azure deployment
+spec:
+  parentRefs: [{ group: gateway.networking.k8s.io, kind: Gateway, name: agentgateway, sectionName: http }]
+  match: { model: azure-gpt-6-luna }                # the name agents ask for
+  provider: Azure
+  azure: { resourceType: Foundry, resourceName: <resource>, projectName: <project> }
+  policies:
+    transformations: [{ field: model, expression: '"gpt-6-luna"' }]   # send the deployment name
+    auth:
+      secretRef: { name: gateway-model-keys, key: azure-gpt-6-luna }
+      location: { header: { name: api-key } }
+```
+
+The operator checks every agent that uses the gateway against these models. An agent whose model is not offered is not ready, and its status says why, e.g. `model gpt-4o is not offered by the gateway; it offers: azure-gpt-6-luna, azure-gpt-6.1-sol`. Adding or removing a model updates every agent's status. The gateway itself refuses models it does not offer.
+
+### Sessions
+
+Chat history, plans and files live in one Postgres (`deploy/postgres.yaml`, database `sessions`), and each agent gets its own schema, `agent_<namespace>_<name>`, which it creates at startup. So agents share the database without seeing each other's sessions, a chat survives a pod restart or rollout, and an agent can run several replicas. The operator hands every agent pod `DATABASE_URL` from the Secret `agent-sessions` (made once by `deploy.sh`, with a generated password) and its `DATABASE_SCHEMA`. In a namespace without that Secret, sessions stay in memory.
 
 ### From a folder to a resource
 
@@ -281,14 +317,17 @@ A hash of everything mounted is in the pod template, so editing the spec or a re
 | Operator setting | Default |
 |---|---|
 | `AGENT_IMAGE` | `agent-runtime:dev` |
-| `DEFAULT_BASE_URL` | unset; the deployment sets `http://llm-gateway.agents:4000/v1` |
-| `AGENT_ENV_<NAME>` | passed to every agent pod as `<NAME>`; an Agent's own `env` wins. The deployment sets `MODEL_BASE_URL` (the gateway) and `MCP_URL` (the shared MCP server) |
+| `DEFAULT_BASE_URL` | unset; the deployment sets the gateway, `http://agentgateway.agents:8080/v1` |
+| `AGENT_ENV_<NAME>` | passed to every agent pod as `<NAME>`; an Agent's own `env` wins. The deployment sets `MODEL_BASE_URL` and `MCP_URL`, both through the gateway |
+| `SESSION_DATABASE_SECRET` | unset (sessions in memory); the deployment sets `agent-sessions`. Its `url` key becomes the pods' `DATABASE_URL` |
+| `GATEWAY_MODELS_NAMESPACE` | unset (no model check); the deployment sets `agents`, where the AgentgatewayModels are |
 
 For development, run the operator on your machine against the cluster (scale the in-cluster one to 0 first):
 
 ```sh
 kubectl -n agent-system scale deploy/agent-operator --replicas=0
-DEFAULT_BASE_URL=http://llm-gateway.agents:4000/v1 cargo run -p agent-operator
+DEFAULT_BASE_URL=http://agentgateway.agents:8080/v1 GATEWAY_MODELS_NAMESPACE=agents \
+  SESSION_DATABASE_SECRET=agent-sessions cargo run -p agent-operator
 ```
 
 `cargo run -q -p agent-operator -- crd > deploy/crd.yaml` regenerates the CRD after changing the types in `spec/` or `operator/src/crd.rs`; a test fails while it is stale.

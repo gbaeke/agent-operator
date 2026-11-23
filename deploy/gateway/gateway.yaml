@@ -1,0 +1,79 @@
+# The platform's agentgateway proxy (the controller is installed by
+# kind/agentgateway.sh). Every agent reaches its model and its MCP tools
+# only through it, at http://agentgateway.agents:8080:
+#
+#   /v1/...   models, OpenAI-compatible; the models it offers are the
+#             AgentgatewayModels made by models-from-host.py, shared by all agents
+#   /mcp      the shared MCP server
+#
+# The gateway holds the model keys, so agents have none, and it is the one
+# place for token metrics and policies on model and tool traffic.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: agentgateway
+  namespace: agents
+spec:
+  gatewayClassName: agentgateway
+  infrastructure:
+    parametersRef: { group: agentgateway.dev, kind: AgentgatewayParameters, name: agentgateway }
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 8080
+      allowedRoutes:
+        namespaces: { from: Same }
+        # A listener only takes the standard route kinds unless told otherwise.
+        kinds:
+          - { group: gateway.networking.k8s.io, kind: HTTPRoute }
+          - { group: agentgateway.dev, kind: AgentgatewayModel }
+---
+# How the controller runs the proxy: inside the cluster only, with the
+# seccomp profile the restricted namespace requires.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayParameters
+metadata:
+  name: agentgateway
+  namespace: agents
+spec:
+  deployment:
+    spec:
+      replicas: 1
+      template:
+        spec:
+          securityContext:
+            seccompProfile: { type: RuntimeDefault }
+  service:
+    spec:
+      type: ClusterIP
+---
+# The MCP server keeps no sessions, so neither does the gateway.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayBackend
+metadata:
+  name: mcp-server
+  namespace: agents
+spec:
+  mcp:
+    sessionRouting: Stateless
+    targets:
+      - name: tools
+        static:
+          host: mcp-server.agents.svc.cluster.local
+          port: 8081
+          path: /mcp
+          protocol: StreamableHTTP
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: mcp
+  namespace: agents
+spec:
+  parentRefs:
+    - name: agentgateway
+  rules:
+    - matches:
+        - path: { type: PathPrefix, value: /mcp }
+      backendRefs:
+        - { group: agentgateway.dev, kind: AgentgatewayBackend, name: mcp-server }

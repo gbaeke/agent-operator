@@ -9,7 +9,10 @@
 //!
 //! Settings: `AGENT_IMAGE` (default `agent-runtime:dev`), `DEFAULT_BASE_URL`
 //! (the model gateway for agents that set no `baseUrl`), `AGENT_ENV_<NAME>`
-//! (passed to every agent pod as `<NAME>`), `RUST_LOG`.
+//! (passed to every agent pod as `<NAME>`), `SESSION_DATABASE_SECRET` (a
+//! Secret whose `url` becomes the pods' `DATABASE_URL`, with a schema per
+//! agent), `GATEWAY_MODELS_NAMESPACE` (check agents' models against the
+//! gateway's AgentgatewayModels there), `RUST_LOG`.
 
 mod crd;
 mod reconcile;
@@ -88,7 +91,13 @@ mod tests {
             serde_json::from_value(serde_json::json!({ "instructions": "Talk like a pirate." })).unwrap(),
         );
         let settings =
-            reconcile::Settings { image: "x".into(), default_base_url: Some("http://gw/v1".into()), agent_env: Vec::new() };
+            reconcile::Settings {
+                image: "x".into(),
+                default_base_url: Some("http://gw/v1".into()),
+                agent_env: Vec::new(),
+                session_secret: None,
+                models_namespace: None,
+            };
         let yaml = reconcile::render(&agent, &settings).unwrap();
         assert!(yaml.contains("name: pirate"), "{yaml}");
         assert!(yaml.contains("baseUrl: http://gw/v1"), "{yaml}");

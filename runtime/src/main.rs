@@ -464,7 +464,8 @@ async fn start(mut bundle: Bundle) -> anyhow::Result<AppState> {
     let mcp_tools: Vec<DynamicTool> =
         futures::future::join_all(bundle.config.mcp_servers.iter().map(mcp_tools)).await.into_iter().flatten().collect();
 
-    let store = Store::open(std::env::var("DATABASE_URL").ok().filter(|url| !url.is_empty())).await?;
+    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let store = Store::open(env("DATABASE_URL"), env("DATABASE_SCHEMA")).await?;
     tracing::info!("sessions are kept in {}", store.kind());
 
     let knowledge = match bundle.enabled(Builtin::Knowledge) {

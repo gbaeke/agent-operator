@@ -19,14 +19,14 @@ use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Capabilities, ConfigMap, ConfigMapProjection, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
-    KeyToPath, ObjectFieldSelector, PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ProjectedVolumeSource,
+    KeyToPath, ObjectFieldSelector, SecretKeySelector, PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ProjectedVolumeSource,
     ResourceRequirements, SeccompProfile, SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
     VolumeProjection,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{ObjectMeta, Patch, PatchParams};
+use kube::api::{ApiResource, DynamicObject, GroupVersionKind, ObjectMeta, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::reflector::ObjectRef;
 use kube::runtime::watcher;
@@ -49,6 +49,13 @@ pub struct Settings {
     /// cluster's values for `${NAME}` placeholders, like compose's
     /// `environment`. An agent's own `env` wins.
     pub agent_env: Vec<(String, String)>,
+    /// A Secret with a `url` key (`SESSION_DATABASE_SECRET`): agent pods get it
+    /// as `DATABASE_URL` and their own `DATABASE_SCHEMA`, so sessions live in
+    /// Postgres and an agent can run several replicas.
+    pub session_secret: Option<String>,
+    /// Where the gateway's AgentgatewayModels live (`GATEWAY_MODELS_NAMESPACE`).
+    /// Agents that use `default_base_url` are checked against them.
+    pub models_namespace: Option<String>,
 }
 
 impl Settings {
@@ -60,6 +67,8 @@ impl Settings {
                 .filter_map(|(key, value)| Some((key.strip_prefix("AGENT_ENV_")?.to_owned(), value)))
                 .filter(|(key, _)| !key.is_empty())
                 .collect(),
+            session_secret: std::env::var("SESSION_DATABASE_SECRET").ok().filter(|name| !name.is_empty()),
+            models_namespace: std::env::var("GATEWAY_MODELS_NAMESPACE").ok().filter(|name| !name.is_empty()),
         }
     }
 }
@@ -86,6 +95,18 @@ pub async fn run(client: Client, settings: Settings) -> anyhow::Result<()> {
     let context = Arc::new(Context { client: client.clone(), settings });
 
     tracing::info!("watching Agents in all namespaces");
+    let mut controller = controller;
+    if let Some(namespace) = &context.settings.models_namespace {
+        // A model added to or removed from the gateway can change any Agent's status.
+        let all = controller.store();
+        controller = controller.watches_with(
+            Api::<DynamicObject>::namespaced_with(client.clone(), namespace, &model_resource()),
+            model_resource(),
+            watcher::Config::default(),
+            move |_| all.state().iter().map(|agent| ObjectRef::from_obj(&**agent)).collect::<Vec<_>>(),
+        );
+        tracing::info!("checking agents' models against the gateway's models in {namespace}");
+    }
     controller
         .owns(Api::<Deployment>::all(client.clone()), watcher::Config::default())
         .owns(Api::<Service>::all(client.clone()), watcher::Config::default())
@@ -114,6 +135,61 @@ pub async fn run(client: Client, settings: Settings) -> anyhow::Result<()> {
         })
         .await;
     Ok(())
+}
+
+fn model_resource() -> ApiResource {
+    ApiResource::from_gvk(&GroupVersionKind::gvk("agentgateway.dev", "v1alpha1", "AgentgatewayModel"))
+}
+
+/// Why the gateway cannot serve this agent's model, if it cannot. Only
+/// agents that send to the operator's default gateway are checked.
+async fn model_problem(agent: &Agent, context: &Context) -> Result<Option<String>, Error> {
+    let settings = &context.settings;
+    let (Some(namespace), Some(gateway)) = (&settings.models_namespace, &settings.default_base_url) else {
+        return Ok(None);
+    };
+    let base_url = agent.spec.agent.base_url.as_deref().map(|url| resolve(url, agent, settings));
+    if base_url.as_deref().is_some_and(|url| !url.is_empty() && url.trim_end_matches('/') != gateway.trim_end_matches('/')) {
+        return Ok(None);
+    }
+    let model = resolve(&agent.spec.agent.model, agent, settings);
+    // The gateway sees the model id, without the `vendor/` the runtime uses to pick a protocol.
+    let id = model.split_once('/').map_or(model.as_str(), |(_, id)| id);
+    let models = Api::<DynamicObject>::namespaced_with(context.client.clone(), namespace, &model_resource())
+        .list(&Default::default())
+        .await?;
+    let offered: Vec<String> = models
+        .items
+        .iter()
+        .map(|model| {
+            let matched = model.data.pointer("/spec/match/model").and_then(|name| name.as_str());
+            matched.map(str::to_owned).unwrap_or_else(|| model.name_any())
+        })
+        .collect();
+    if offered.iter().any(|pattern| model_matches(pattern, id)) {
+        return Ok(None);
+    }
+    let mut names = offered;
+    names.sort();
+    Ok(Some(format!("model {id} is not offered by the gateway; it offers: {}", names.join(", "))))
+}
+
+/// The gateway's model matching: exact, `prefix*`, `*suffix` or `*`.
+fn model_matches(pattern: &str, model: &str) -> bool {
+    match (pattern.strip_suffix('*'), pattern.strip_prefix('*')) {
+        _ if pattern == "*" => true,
+        (Some(prefix), _) => model.starts_with(prefix),
+        (_, Some(suffix)) => model.ends_with(suffix),
+        _ => pattern == model,
+    }
+}
+
+/// The schema an agent's sessions live in: unique per namespace and name.
+fn schema_name(agent: &Agent) -> String {
+    let raw = format!("agent_{}_{}", agent.namespace().unwrap_or_default(), agent.name_any());
+    let schema: String = raw.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '_' }).collect();
+    // Postgres truncates identifiers at 63 bytes.
+    schema.chars().take(63).collect()
 }
 
 fn references(agent: &Agent, config_map: &str) -> bool {
@@ -179,9 +255,12 @@ async fn reconcile(agent: Arc<Agent>, context: Arc<Context>) -> Result<Action, E
         && status.available_replicas.unwrap_or(0) == wanted
         && status.replicas.unwrap_or(0) == wanted;
     let ready_replicas = status.ready_replicas.unwrap_or(0);
-    let ready = missing.is_empty() && rolled_out;
+    let model_problem = model_problem(&agent, &context).await?;
+    let ready = missing.is_empty() && model_problem.is_none() && rolled_out;
     let message = if !missing.is_empty() {
         Some(format!("missing ConfigMaps: {}", missing.join(", ")))
+    } else if let Some(problem) = model_problem {
+        Some(problem)
     } else if !ready {
         let updated = status.updated_replicas.unwrap_or(0);
         let old = (status.replicas.unwrap_or(0) - updated).max(0);
@@ -337,6 +416,18 @@ fn deployment(
         value: Some(value.clone()),
         ..Default::default()
     }));
+    if let Some(secret) = &settings.session_secret {
+        env.push(EnvVar {
+            name: "DATABASE_URL".to_owned(),
+            value_from: Some(EnvVarSource {
+                // Optional: in a namespace without the Secret, sessions stay in memory.
+                secret_key_ref: Some(SecretKeySelector { name: secret.clone(), key: "url".to_owned(), optional: Some(true) }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        env.push(EnvVar { name: "DATABASE_SCHEMA".to_owned(), value: Some(schema_name(agent)), ..Default::default() });
+    }
     env.extend(agent.spec.env.iter().cloned());
 
     let probe = |path: &str, period: i32| Probe {
@@ -456,6 +547,8 @@ mod tests {
             image: "agent-runtime:dev".into(),
             default_base_url: None,
             agent_env: vec![("MCP_URL".into(), "http://mcp-server.agents:8081/mcp".into())],
+            session_secret: Some("agent-sessions".into()),
+            models_namespace: None,
         };
         let skills = vec![("sla-credit".to_owned(), config_map("skill-sla-credit", &[("SKILL.md", "x"), ("example.md", "y")]))];
         let knowledge = config_map("quokka-kb", &[("pricing.md", "z")]);
@@ -476,7 +569,7 @@ mod tests {
         );
         assert_eq!(pod.containers[0].image.as_deref(), Some("agent-runtime:dev"));
         let env: Vec<&str> = pod.containers[0].env.iter().flatten().map(|var| var.name.as_str()).collect();
-        assert_eq!(env, ["POD_NAME", "MCP_URL"]);
+        assert_eq!(env, ["POD_NAME", "MCP_URL", "DATABASE_URL", "DATABASE_SCHEMA"]);
         assert_eq!(deployment.spec.as_ref().unwrap().replicas, Some(2));
     }
 
@@ -486,12 +579,30 @@ mod tests {
             image: String::new(),
             default_base_url: None,
             agent_env: vec![("AGENT_MODEL".into(), "openai/azure-gpt-6.1-sol".into())],
+            session_secret: None,
+            models_namespace: None,
         };
         let agent = agent();
         assert_eq!(resolve("${AGENT_MODEL:-openai/x}", &agent, &settings), "openai/azure-gpt-6.1-sol");
         assert_eq!(resolve("${OTHER:-openai/x}", &agent, &settings), "openai/x");
         assert_eq!(resolve("${UNSET}", &agent, &settings), "${UNSET}");
         assert_eq!(resolve("anthropic/claude", &agent, &settings), "anthropic/claude");
+    }
+
+    #[test]
+    fn matches_models_like_the_gateway() {
+        assert!(model_matches("azure-gpt-6-luna", "azure-gpt-6-luna"));
+        assert!(!model_matches("azure-gpt-6-luna", "azure-gpt-6.1-sol"));
+        assert!(model_matches("azure-*", "azure-gpt-6.1-sol"));
+        assert!(model_matches("*-luna", "azure-gpt-6-luna"));
+        assert!(model_matches("*", "anything"));
+    }
+
+    #[test]
+    fn schema_names_are_postgres_identifiers() {
+        let mut agent = Agent::new("trip-planner", serde_json::from_value(json!({})).unwrap());
+        agent.metadata.namespace = Some("team-a".into());
+        assert_eq!(schema_name(&agent), "agent_team_a_trip_planner");
     }
 
     #[test]

@@ -33,7 +33,7 @@ pub struct AgentSpec {
     /// Markdown documents the agent can search, as the keys of one ConfigMap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knowledge: Option<ConfigMapRef>,
-    /// Pods to run. Sessions live in memory, so keep 1 until a session database is configured.
+    /// Pods to run. More than 1 needs the operator's session database, so any pod can serve any chat.
     #[serde(default = "one")]
     pub replicas: i32,
     /// The agent-runtime image. Defaults to the operator's.

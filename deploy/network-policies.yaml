@@ -1,0 +1,93 @@
+# Who may talk to whom in the agents namespace. Model and tool traffic must
+# go through the gateway:
+#
+#   console ──► agents ──► agentgateway ──► models (Azure), mcp-server
+#                  └─────► postgres
+#
+# Agents may only reach the gateway, Postgres and DNS; only the console may
+# call an agent; only the gateway reaches the MCP server; only agents reach
+# Postgres. The gateway and the MCP server may go out (models, web tools).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-egress
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: agent }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { gateway.networking.k8s.io/gateway-name: agentgateway }
+      ports: [{ port: 8080 }]
+    - to:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: postgres }
+      ports: [{ port: 5432 }]
+    - to:
+        - namespaceSelector:
+            matchLabels: { kubernetes.io/metadata.name: kube-system }
+          podSelector:
+            matchLabels: { k8s-app: kube-dns }
+      ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: agent-ingress
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: agent }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: agent-console }
+      ports: [{ port: 3000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gateway-ingress
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels: { gateway.networking.k8s.io/gateway-name: agentgateway }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: agent }
+      ports: [{ port: 8080 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mcp-server-ingress
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: mcp-server }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { gateway.networking.k8s.io/gateway-name: agentgateway }
+      ports: [{ port: 8081 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: agents
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: agent }
+      ports: [{ port: 5432 }]

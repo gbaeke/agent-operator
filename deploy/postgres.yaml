@@ -1,0 +1,79 @@
+# One Postgres for the agents' chat sessions, in the database `sessions`;
+# each agent has its own schema (agent_<namespace>_<name>), made by the agent
+# at startup. Fine locally; in a real cluster use a managed database and
+# change only the Secret `agent-sessions`.
+#
+# deploy.sh makes the Secrets once: `postgres` (the password) and
+# `agent-sessions` (key `url`, which the operator hands to agents as DATABASE_URL).
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: agents
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: postgres }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        # The alpine image's postgres user, so the restricted profile is met.
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_USER, value: agent }
+            - { name: POSTGRES_DB, value: sessions }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: postgres, key: password } }
+            # A subdirectory: the volume's root is not empty on some storage.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ name: postgres, containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "agent", "-d", "sessions", "-h", "127.0.0.1"] }
+            periodSeconds: 5
+          livenessProbe:
+            exec: { command: ["pg_isready", "-U", "agent", "-d", "sessions", "-h", "127.0.0.1"] }
+            periodSeconds: 10
+            failureThreshold: 6
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: { storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: agents
+spec:
+  selector: { app.kubernetes.io/name: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }

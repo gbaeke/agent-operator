@@ -209,7 +209,7 @@ spec:
                 type: string
               replicas:
                 default: 1
-                description: Pods to run. Sessions live in memory, so keep 1 until a session database is configured.
+                description: Pods to run. More than 1 needs the operator's session database, so any pod can serve any chat.
                 format: int32
                 type: integer
               resources:

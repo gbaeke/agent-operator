@@ -3,13 +3,21 @@
 //! a time. With `DATABASE_URL` all three live in Postgres and every replica
 //! shares them, so any pod can serve any message. Without it they live in
 //! this process's memory, as for `cargo run`.
+//!
+//! With `DATABASE_SCHEMA` as well, the tables live in that schema, which is
+//! made at startup: several agents then share one database without seeing
+//! each other's sessions.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use rig::memory::MemoryStore;
 use rig::postgres::PostgresSessionStore;
-use sqlx::{Connection, PgConnection, PgPool};
+use std::str::FromStr;
+
+use anyhow::bail;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+use sqlx::{ConnectOptions, PgPool};
 
 use crate::tools::Workspace;
 
@@ -39,8 +47,11 @@ pub struct Store {
 
 enum Backend {
     Postgres {
-        url: String,
+        /// With `search_path` set to the schema, for the pool and the turn locks.
+        options: Box<PgConnectOptions>,
         pool: PgPool,
+        /// Part of every advisory lock key, so agents sharing a database do not block each other.
+        scope: String,
     },
     Memory {
         workspaces: Mutex<HashMap<String, Workspace>>,
@@ -52,7 +63,7 @@ enum Backend {
 pub enum TurnLock {
     /// A session-level advisory lock, released when this connection closes,
     /// so also when the stream is dropped or the pod dies.
-    Postgres(#[allow(dead_code)] PgConnection),
+    Postgres(#[allow(dead_code)] sqlx::PgConnection),
     Memory { busy: Arc<Mutex<HashSet<String>>>, session: String },
 }
 
@@ -65,19 +76,35 @@ impl Drop for TurnLock {
 }
 
 impl Store {
-    pub async fn open(database_url: Option<String>) -> anyhow::Result<Self> {
+    pub async fn open(database_url: Option<String>, schema: Option<String>) -> anyhow::Result<Self> {
         let Some(url) = database_url else {
             return Ok(Self {
                 history: History::Memory(MemoryStore::default()),
                 backend: Backend::Memory { workspaces: Mutex::default(), busy: Arc::default() },
             });
         };
-        let pool = PgPool::connect(&url).await?;
+        let mut options = PgConnectOptions::from_str(&url)?;
+        let scope = match &schema {
+            Some(schema) => {
+                if schema.is_empty() || !schema.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
+                    bail!("DATABASE_SCHEMA `{schema}` may only have lowercase letters, digits and _");
+                }
+                let mut connection = options.connect().await?;
+                // Safe: the name was checked above to be [a-z0-9_]+.
+                sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"")))
+                    .execute(&mut connection)
+                    .await?;
+                options = options.options([("search_path", schema.as_str())]);
+                schema.clone()
+            }
+            None => "public".to_owned(),
+        };
+        let pool = PgPoolOptions::new().connect_with(options.clone()).await?;
         let history = History::Postgres(PostgresSessionStore::open(pool.clone()).await?);
         let mut tx = pool.begin().await?;
         sqlx::raw_sql(SCHEMA).execute(&mut *tx).await?;
         tx.commit().await?;
-        Ok(Self { history, backend: Backend::Postgres { url, pool } })
+        Ok(Self { history, backend: Backend::Postgres { options: Box::new(options), pool, scope } })
     }
 
     pub fn kind(&self) -> &'static str {
@@ -90,12 +117,13 @@ impl Store {
     /// The session's turn lock, or `None` while another turn of it runs, on any replica.
     pub async fn lock(&self, session: &str) -> anyhow::Result<Option<TurnLock>> {
         match &self.backend {
-            Backend::Postgres { url, .. } => {
+            Backend::Postgres { options, scope, .. } => {
                 // Its own connection, not a pooled one: a pooled connection
                 // would go back to the pool still holding the lock.
-                let mut connection = PgConnection::connect(url).await?;
+                let mut connection = options.connect().await?;
                 let (locked,): (bool,) =
-                    sqlx::query_as("SELECT pg_try_advisory_lock(hashtext('agent_turn'), hashtext($1))")
+                    sqlx::query_as("SELECT pg_try_advisory_lock(hashtext($1), hashtext($2))")
+                        .bind(format!("agent_turn/{scope}"))
                         .bind(session)
                         .fetch_one(&mut connection)
                         .await?;
@@ -127,9 +155,10 @@ impl Store {
     /// and returns how many went. One replica at a time does it; the others
     /// return 0. In memory nothing expires: the process does not live that long.
     pub async fn expire(&self, idle: std::time::Duration) -> anyhow::Result<u64> {
-        let Backend::Postgres { pool, .. } = &self.backend else { return Ok(0) };
+        let Backend::Postgres { pool, scope, .. } = &self.backend else { return Ok(0) };
         let mut tx = pool.begin().await?;
-        let (ours,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock(hashtext('agent_expiry'))")
+        let (ours,): (bool,) = sqlx::query_as("SELECT pg_try_advisory_xact_lock(hashtext($1))")
+            .bind(format!("agent_expiry/{scope}"))
             .fetch_one(&mut *tx)
             .await?;
         if !ours {
