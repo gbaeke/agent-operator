@@ -202,13 +202,13 @@ From nothing to three running agents:
 ```sh
 kind/cluster.sh up                      # the kind cluster `agents` (1 control plane, 2 workers)
 deploy/deploy.sh                        # build, load into kind, deploy the platform
-kubectl apply -f deploy/samples/        # three agents
+kubectl apply -f deploy/samples/        # four sample agents
 open http://localhost:32000
 ```
 
 You need Docker, kind, kubectl and helm (`kind/cluster.sh install` gets the last three), Python 3 with PyYAML, openssl, and a standalone agentgateway config with your Azure models (`~/.config/agentgateway/config.yaml`, or set `AGENTGATEWAY_CONFIG`): `deploy.sh` copies its Azure models and keys into the cluster, see [Models](#models).
 
-`deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner and pirate. The platform:
+`deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner, pirate and learn (Microsoft Learn's MCP server). The platform:
 
 | Namespace | What |
 |---|---|
@@ -217,8 +217,9 @@ You need Docker, kind, kubectl and helm (`kind/cluster.sh install` gets the last
 | `agents` | `agent-console` (NodePort 32000), `agentgateway` (the proxy for models and MCP), `mcp-server`, `postgres` (sessions), and your agents |
 
 ```
-console ──► agents ──► agentgateway ──► Azure models
-                 │           └────────► mcp-server ──► the web (weather, fetch_url)
+console ──► agents ──► agentgateway ──► Azure models                  /v1
+                 │           ├────────► mcp-server ──► the web (weather) /mcp
+                 │           └────────► learn.microsoft.com MCP          /learn/mcp
                  └───► postgres (sessions, a schema per agent)
 ```
 
@@ -289,6 +290,10 @@ spec:
 
 The operator checks every agent that uses the gateway against these models. An agent whose model is not offered is not ready, and its status says why, e.g. `model gpt-4o is not offered by the gateway; it offers: azure-gpt-6-luna, azure-gpt-6.1-sol`. Adding or removing a model updates every agent's status. The gateway itself refuses models it does not offer.
 
+### MCP servers
+
+The gateway offers two MCP servers to every agent: the sample `mcp-server` on `/mcp`, and Microsoft Learn's public server on `/learn/mcp` (`deploy/gateway/gateway.yaml`). Agents cannot reach the internet themselves: the gateway calls Learn over TLS, and the MCP server calls the weather API and web pages. To add a server, add an `AgentgatewayBackend` and an `HTTPRoute` on its own path, and an `AGENT_ENV_*` setting if agents refer to it by a placeholder.
+
 ### Sessions
 
 Chat history, plans and files live in one Postgres (`deploy/postgres.yaml`, database `sessions`), and each agent gets its own schema, `agent_<namespace>_<name>`, which it creates at startup. So agents share the database without seeing each other's sessions, a chat survives a pod restart or rollout, and an agent can run several replicas. The operator hands every agent pod `DATABASE_URL` from the Secret `agent-sessions` (made once by `deploy.sh`, with a generated password) and its `DATABASE_SCHEMA`. In a namespace without that Secret, sessions stay in memory.
@@ -304,6 +309,22 @@ cargo run -q -p agent-operator -- render agents/my-agent --name other --namespac
 
 Each skill becomes a ConfigMap `<agent>-skill-<skill>`, `knowledge/*.md` becomes `<agent>-knowledge`, and `instructions.md` moves into `instructions`. `${VAR}` placeholders are kept: in the cluster the operator's `AGENT_ENV_*` settings provide them (below), as compose does for containers, so the same folder works in both. `deploy/samples/` is rendered from `agents/` by `deploy/samples.sh`; a test fails when a sample is stale.
 
+### Agent Studio: a form instead of YAML
+
+A small local web app to define an agent and run it in the cluster:
+
+```sh
+cargo run -p agent-studio          # http://127.0.0.1:8090
+```
+
+- **Define** the agent in a form: name, description, instructions, tool groups, a model from the gateway's list, MCP servers found on the gateway, skills (write new ones or tick existing skill ConfigMaps), markdown files to upload as knowledge, example prompts, turns and replicas. Three starters fill it in: blank, a Microsoft docs helper and a weather buddy.
+- **See** the YAML it will apply, updated as you type.
+- **Deploy** applies one ConfigMap per written skill (`<agent>-skill-<skill>`), a `<agent>-knowledge` ConfigMap and the Agent, with server-side apply and strict field validation, then follows the status until the agent runs, with a link to it in the console. Nothing is applied when the API server rejects the Agent, and its message is shown.
+- **Edit** any agent from the list on the left. Fields the form does not show, such as subagents, are kept. Skills you remove also lose their ConfigMap.
+- **Delete** removes the Agent (the operator's objects go with it) and the studio's ConfigMaps for it.
+
+It uses your kubeconfig and only listens on 127.0.0.1. Settings: `STUDIO_CONTEXT` (default `kind-agents`, shown in the header), `STUDIO_NAMESPACE` (`agents`), `STUDIO_ADDR` (`127.0.0.1:8090`), `CONSOLE_URL` (`http://localhost:32000`).
+
 ### What the operator does
 
 For each `Agent`, with server-side apply and owner references, so deleting the Agent deletes them:
@@ -318,7 +339,7 @@ A hash of everything mounted is in the pod template, so editing the spec or a re
 |---|---|
 | `AGENT_IMAGE` | `agent-runtime:dev` |
 | `DEFAULT_BASE_URL` | unset; the deployment sets the gateway, `http://agentgateway.agents:8080/v1` |
-| `AGENT_ENV_<NAME>` | passed to every agent pod as `<NAME>`; an Agent's own `env` wins. The deployment sets `MODEL_BASE_URL` and `MCP_URL`, both through the gateway |
+| `AGENT_ENV_<NAME>` | passed to every agent pod as `<NAME>`; an Agent's own `env` wins. The deployment sets `MODEL_BASE_URL`, `MCP_URL` and `LEARN_MCP_URL`, all through the gateway |
 | `SESSION_DATABASE_SECRET` | unset (sessions in memory); the deployment sets `agent-sessions`. Its `url` key becomes the pods' `DATABASE_URL` |
 | `GATEWAY_MODELS_NAMESPACE` | unset (no model check); the deployment sets `agents`, where the AgentgatewayModels are |
 
@@ -346,6 +367,7 @@ With `CONSOLE_DISCOVERY=kubernetes` the console watches the Agents in `CONSOLE_N
 - `console/src/main.rs`: the console: health checks, change events and the streaming proxy; `registry.rs`: static or Kubernetes discovery.
 - `spec/src/lib.rs`: the agent.yaml types, shared by the runtime and the operator.
 - `operator/src/crd.rs`: the `Agent` resource; `reconcile.rs`: what an Agent becomes; `render.rs`: folder to resource.
+- `studio/`: Agent Studio, the local form-to-cluster app (`main.rs` and its one page, `index.html`).
 - `kind/`: the local cluster; `deploy/`: the CRD, platform manifests, `deploy.sh` and the rendered `samples/`.
 - `ui/index.html`: the one UI, in agent or console mode.
 - `mcp-server/`: the sample MCP server, copied unchanged from rust-agents.
