@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 520" width="960" height="520" role="img" aria-label="agent-operator architecture: browser, console, agents, agentgateway, models, MCP servers, Postgres, operator and Kubernetes API">
+  <style>
+    text { font-family: "Segoe UI", system-ui, -apple-system, sans-serif; }
+    .d-box { fill: #ffffff; stroke: #c7d0da; stroke-width: 1.5; }
+    .d-acc { fill: #fbe4d7; stroke: #b8460f; stroke-width: 1.5; }
+    .d-k8s { fill: #dce8f6; stroke: #2360a5; stroke-width: 1.5; }
+    .d-ok { fill: #d6efe1; stroke: #1d7448; stroke-width: 1.5; }
+    .d-frame { fill: none; stroke: #2360a5; stroke-width: 1.2; stroke-dasharray: 5 4; }
+    .d-t { fill: #14202c; font-size: 13px; font-weight: 600; }
+    .d-tl { fill: #14202c; font-size: 15px; font-weight: 700; }
+    .d-s { fill: #586676; font-size: 11px; font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+    .d-sa { fill: #b8460f; font-size: 11px; font-weight: 600; font-family: ui-monospace, Menlo, monospace; }
+    .d-sk { fill: #2360a5; font-size: 11px; font-weight: 600; font-family: ui-monospace, Menlo, monospace; }
+    .d-line { stroke: #586676; stroke-width: 1.5; fill: none; }
+    .d-line-acc { stroke: #b8460f; stroke-width: 1.8; fill: none; }
+    .d-line-k8s { stroke: #2360a5; stroke-width: 1.6; fill: none; }
+    .d-line-ok { stroke: #1d7448; stroke-width: 1.6; fill: none; }
+    .d-dash { stroke-dasharray: 5 4; }
+    .flow { stroke-dasharray: 6 6; animation: flow 1.6s linear infinite; }
+    @keyframes flow { to { stroke-dashoffset: -24; } }
+    @media (prefers-reduced-motion: reduce) { .flow { animation: none; } }
+  </style>
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#586676"/></marker>
+    <marker id="ah-acc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#b8460f"/></marker>
+    <marker id="ah-k8s" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#2360a5"/></marker>
+    <marker id="ah-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#1d7448"/></marker>
+  </defs>
+  <rect x="0" y="0" width="960" height="520" rx="14" fill="#f3f5f8"/>
+            <!-- top: control plane -->
+            <rect x="170" y="22" width="160" height="58" rx="8" class="d-acc"/>
+            <text x="250" y="47" text-anchor="middle" class="d-t">agent-operator</text>
+            <text x="250" y="65" text-anchor="middle" class="d-s">ns agent-system</text>
+            <rect x="420" y="22" width="180" height="58" rx="8" class="d-k8s"/>
+            <text x="510" y="47" text-anchor="middle" class="d-t">Kubernetes API</text>
+            <text x="510" y="65" text-anchor="middle" class="d-s">Agents · Deployments · …</text>
+            <path d="M330 44 L418 44" class="d-line-k8s" marker-end="url(#ah-k8s)"/>
+            <path d="M418 60 L332 60" class="d-line-k8s" marker-end="url(#ah-k8s)"/>
+            <text x="374" y="38" text-anchor="middle" class="d-sk">apply</text>
+            <text x="374" y="75" text-anchor="middle" class="d-sk">watch</text>
+
+            <!-- namespace frame -->
+            <rect x="150" y="112" width="640" height="392" rx="12" class="d-frame"/>
+            <text x="166" y="132" class="d-sk">namespace agents · restricted pod security</text>
+
+            <!-- browser -->
+            <rect x="16" y="226" width="112" height="58" rx="8" class="d-box"/>
+            <text x="72" y="251" text-anchor="middle" class="d-t">Browser</text>
+            <text x="72" y="269" text-anchor="middle" class="d-s">:32000</text>
+
+            <!-- console -->
+            <rect x="170" y="226" width="134" height="58" rx="8" class="d-box"/>
+            <text x="237" y="251" text-anchor="middle" class="d-t">agent-console</text>
+            <text x="237" y="269" text-anchor="middle" class="d-s">UI + proxy</text>
+            <path d="M128 255 L168 255" class="d-line" marker-end="url(#ah)"/>
+            <path d="M237 224 C 237 160, 440 150, 470 82" class="d-line-k8s d-dash" marker-end="url(#ah-k8s)"/>
+            <text x="300" y="168" class="d-sk">watch Agents</text>
+
+            <!-- agents -->
+            <g>
+              <rect x="350" y="176" width="150" height="46" rx="8" class="d-box"/>
+              <text x="425" y="198" text-anchor="middle" class="d-t">quokka</text>
+              <text x="425" y="213" text-anchor="middle" class="d-s">knowledge · skills</text>
+              <rect x="350" y="232" width="150" height="46" rx="8" class="d-box"/>
+              <text x="425" y="254" text-anchor="middle" class="d-t">trip-planner</text>
+              <text x="425" y="269" text-anchor="middle" class="d-s">weather skill</text>
+              <rect x="350" y="288" width="150" height="46" rx="8" class="d-box"/>
+              <text x="425" y="310" text-anchor="middle" class="d-t">learn · pirate</text>
+              <text x="425" y="325" text-anchor="middle" class="d-s">same image</text>
+            </g>
+            <path d="M304 255 L348 199" class="d-line" marker-end="url(#ah)"/>
+            <path d="M304 255 L348 255" class="d-line" marker-end="url(#ah)"/>
+            <path d="M304 255 L348 311" class="d-line" marker-end="url(#ah)"/>
+            <path d="M510 82 L 510 150 L 425 150 L 425 174" class="d-line-acc d-dash" marker-end="url(#ah-acc)"/>
+            <text x="518" y="128" class="d-sa">Deployment · Service · ConfigMap</text>
+
+            <!-- gateway -->
+            <rect x="560" y="200" width="150" height="112" rx="10" class="d-acc"/>
+            <text x="635" y="228" text-anchor="middle" class="d-tl">agentgateway</text>
+            <text x="635" y="250" text-anchor="middle" class="d-s">/v1  models</text>
+            <text x="635" y="268" text-anchor="middle" class="d-s">/mcp  tools</text>
+            <text x="635" y="286" text-anchor="middle" class="d-s">/learn/mcp</text>
+            <text x="635" y="302" text-anchor="middle" class="d-sa">holds the keys</text>
+            <path d="M500 199 L558 236" class="d-line-acc flow"/>
+            <path d="M500 255 L558 255" class="d-line-acc flow"/>
+            <path d="M500 311 L558 276" class="d-line-acc flow"/>
+
+            <!-- mcp + postgres inside -->
+            <rect x="560" y="418" width="150" height="54" rx="8" class="d-box"/>
+            <text x="635" y="441" text-anchor="middle" class="d-t">mcp-server</text>
+            <text x="635" y="458" text-anchor="middle" class="d-s">weather · time · calc</text>
+            <path d="M635 312 L635 416" class="d-line" marker-end="url(#ah)"/>
+            <rect x="350" y="418" width="150" height="54" rx="8" class="d-ok"/>
+            <text x="425" y="441" text-anchor="middle" class="d-t">postgres</text>
+            <text x="425" y="458" text-anchor="middle" class="d-s">a schema per agent</text>
+            <path d="M425 334 L425 416" class="d-line-ok" marker-end="url(#ah-ok)"/>
+
+            <!-- outside -->
+            <rect x="820" y="176" width="128" height="58" rx="8" class="d-box"/>
+            <text x="884" y="201" text-anchor="middle" class="d-t">Azure Foundry</text>
+            <text x="884" y="219" text-anchor="middle" class="d-s">luna · sol</text>
+            <rect x="820" y="262" width="128" height="58" rx="8" class="d-box"/>
+            <text x="884" y="287" text-anchor="middle" class="d-t">Microsoft Learn</text>
+            <text x="884" y="305" text-anchor="middle" class="d-s">MCP over TLS</text>
+            <rect x="820" y="418" width="128" height="54" rx="8" class="d-box"/>
+            <text x="884" y="441" text-anchor="middle" class="d-t">Open-Meteo</text>
+            <text x="884" y="458" text-anchor="middle" class="d-s">the web</text>
+            <path d="M710 232 L818 205" class="d-line" marker-end="url(#ah)"/>
+            <path d="M710 282 L818 291" class="d-line" marker-end="url(#ah)"/>
+            <path d="M710 445 L818 445" class="d-line" marker-end="url(#ah)"/>
+          </svg>

@@ -1,6 +1,86 @@
 # agent-operator
 
-One container image, many agents. `agent-runtime` is a generic "deep agent" in Rust ([rig](https://github.com/0xPlaygrounds/rig) 0.46). Everything that makes an agent unique lives in a **folder**:
+Run AI agents on Kubernetes by writing YAML. An `Agent` resource becomes a running agent: a Rust operator builds it from one generic agent image, an in-cluster [agentgateway](https://agentgateway.dev) holds the model keys and the MCP tools, and one console lists every agent the moment it exists. **Agent Studio**, a small local app, does the same from a form.
+
+![Architecture: the browser talks to the console, the console to the agents, the agents only to agentgateway (models and MCP tools) and Postgres; the operator watches the Kubernetes API and creates each agent](docs/images/architecture.svg)
+
+| Part | What it does |
+|---|---|
+| `agent-runtime` | One "deep agent" binary in Rust ([rig](https://github.com/0xPlaygrounds/rig) 0.46): planning, a scratch filesystem, BM25 search over documents, skills, subagents and MCP tools, all switched on or off per agent |
+| `agent-operator` | A [kube-rs](https://kube.rs) controller: each `Agent` becomes a ConfigMap, a Deployment and a Service; status says when it is ready, or why not |
+| `agent-console` | One web UI for every agent; it watches the `Agent` resources and proxies each agent's API, so agents stay cluster-internal |
+| `agent-studio` | A local form to define, deploy, edit and delete agents |
+| agentgateway | Models and MCP servers declared once, shared by all agents; it holds the keys |
+| Postgres | Chat sessions, a schema per agent, so chats survive restarts and agents can scale |
+
+## Agent Studio
+
+Fill in a form, see the YAML, click **Deploy to cluster**: the agent runs a couple of seconds later.
+
+![Agent Studio: a form with display name, description, model, instructions, tool groups, MCP servers from the gateway and skills, next to the generated YAML and a Deploy to cluster button](docs/images/studio.jpg)
+
+## The console
+
+Every agent in the cluster, with its plan, files and tool calls as it works. A `kubectl apply` shows up in the sidebar without a reload.
+
+![The agent console: a list of agents on the left, a Quokka Assistant chat in the middle with tool calls and an answer of €3,759, and the agent's completed plan on the right](docs/images/console.jpg)
+
+## Quick start
+
+From nothing to four running agents on a local [kind](https://kind.sigs.k8s.io) cluster, in about two minutes:
+
+```sh
+kind/cluster.sh up                      # a kind cluster `agents`: 1 control plane, 2 workers
+deploy/deploy.sh                        # build the images, load them into kind, deploy the platform
+kubectl apply -f deploy/samples/        # quokka, trip-planner, pirate, learn
+open http://localhost:32000             # the console
+
+cargo run -p agent-studio               # Agent Studio on http://127.0.0.1:8090
+```
+
+You need Docker, kind, kubectl and helm (`kind/cluster.sh install` gets the last three), Rust, Python 3 with PyYAML, openssl, and a standalone agentgateway config with your Azure models (`~/.config/agentgateway/config.yaml`, or set `AGENTGATEWAY_CONFIG`). `deploy.sh` copies those models and keys into the cluster; see [Models](#models).
+
+## Three ways to create an agent
+
+**1. Write an Agent.** Two fields are enough; everything else has a default.
+
+```yaml
+apiVersion: agents.baeke.info/v1alpha1
+kind: Agent
+metadata:
+  name: haiku-poet
+  namespace: agents
+spec:
+  model: openai/azure-gpt-6-luna
+  instructions: Answer every question with a single haiku.
+```
+
+```sh
+kubectl apply -f haiku-poet.yaml
+kubectl -n agents get agents          # NAME  MODEL  READY  AGE
+```
+
+Add MCP tools, skills, a knowledge base, subagents or replicas as you need them: see [An agent is a resource](#an-agent-is-a-resource) and the [agent.yaml](#agentyaml) fields.
+
+**2. Use Agent Studio.** `cargo run -p agent-studio`, then [the form](#agent-studio-a-form-instead-of-yaml).
+
+**3. Start from a folder.** Develop an agent locally as a folder ([below](#without-kubernetes)), then send it to the cluster:
+
+```sh
+cargo run -q -p agent-operator -- render agents/my-agent | kubectl apply -f -
+```
+
+## Contents
+
+- [Without Kubernetes](#without-kubernetes): an agent as a folder, `cargo run`, Docker and compose
+- [agent.yaml](#agentyaml): every field, tool groups, skills
+- [Agent API (v1)](#agent-api-v1) and the [console](#console)
+- [Kubernetes](#kubernetes): the `Agent` resource, models, MCP servers, sessions, `render`, Agent Studio, the operator
+- [Code map](#code-map), [known issues](#known-issues), and open items in [docs/todo.md](docs/todo.md)
+
+## Without Kubernetes
+
+Everything that makes an agent unique lives in a folder, and `agent-runtime` runs any of them:
 
 ```
 agents/my-agent/
@@ -11,12 +91,6 @@ agents/my-agent/
 ```
 
 Only `agent.yaml` is required, and the smallest one is a single line: `instructions: You are a helpful assistant.`
-
-A separate **console** gives one web UI for all agents (see [Console](#console)).
-
-On Kubernetes, an **operator** turns `Agent` resources into running agents: the same fields as agent.yaml, in a YAML resource you `kubectl apply`. No folder needed there (see [Kubernetes](#kubernetes)).
-
-## Quick start
 
 ```sh
 cargo run -p mcp-server                          # terminal 1: shared tools (calculate, time, weather, fetch)
@@ -197,18 +271,7 @@ Agent and console serve the same `ui/index.html`. The console switches it to con
 
 ## Kubernetes
 
-From nothing to three running agents:
-
-```sh
-kind/cluster.sh up                      # the kind cluster `agents` (1 control plane, 2 workers)
-deploy/deploy.sh                        # build, load into kind, deploy the platform
-kubectl apply -f deploy/samples/        # four sample agents
-open http://localhost:32000
-```
-
-You need Docker, kind, kubectl and helm (`kind/cluster.sh install` gets the last three), Python 3 with PyYAML, openssl, and a standalone agentgateway config with your Azure models (`~/.config/agentgateway/config.yaml`, or set `AGENTGATEWAY_CONFIG`): `deploy.sh` copies its Azure models and keys into the cluster, see [Models](#models).
-
-`deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner, pirate and learn (Microsoft Learn's MCP server). The platform:
+The [quick start](#quick-start) has the commands and what you need. `deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner, pirate and learn (Microsoft Learn's MCP server). The platform:
 
 | Namespace | What |
 |---|---|
