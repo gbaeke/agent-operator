@@ -157,7 +157,14 @@ async fn main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         registry,
         changes,
-        http: reqwest::Client::builder().connect_timeout(Duration::from_secs(3)).build()?,
+        http: reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            // No idle connections: Kubernetes balances a Service per connection, so a reused
+            // connection would send every request to the same pod of an agent with several
+            // replicas. A new connection per request lets each chat land on any pod; the
+            // extra setup is nothing next to a model call.
+            .pool_max_idle_per_host(0)
+            .build()?,
     });
     // The shared UI, switched to console mode.
     let page = include_str!("../../ui/index.html").replacen(r#"data-mode="agent""#, r#"data-mode="console""#, 1);
