@@ -1,0 +1,22 @@
+# A small agent with no knowledge base: a few MCP tools, one skill, no files or subagents.
+name: Trip Planner
+description: Plans short trips around the weather and local time, and writes packing lists.
+model: ${AGENT_MODEL:-openai/azure-gpt-6-luna}
+# The local agentgateway, which holds the Azure key. Remove this line to call the vendor directly.
+baseUrl: ${MODEL_BASE_URL:-http://localhost:4000/v1}
+maxTurns: 15
+
+instructions: |
+  You are a cheerful, practical trip planner. Check the live weather and local time for every
+  destination before you suggest anything, and plan around them. Keep answers short, use bullet
+  points, and end with one tip the traveller would not think of themselves.
+
+tools: [planning, skills]
+
+mcpServers:
+  - url: ${MCP_URL:-http://127.0.0.1:8081/mcp}
+    tools: [get_weather, current_time, calculate]
+
+examples:
+  - I'm in Ghent for the weekend. What should I do on Saturday?
+  - Make me a packing list for three days in Lisbon.

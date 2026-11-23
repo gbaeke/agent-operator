@@ -1,0 +1,6 @@
+# Bake an agent folder into its own image, e.g. for a registry:
+#
+#   docker build -f agents/Dockerfile.example -t quokka agents/quokka
+#   docker run -p 3000:3000 quokka
+FROM agent-runtime
+COPY . /agent

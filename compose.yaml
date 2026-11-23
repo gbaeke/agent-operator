@@ -1,0 +1,51 @@
+# Three agents from the same agent-runtime image, one shared MCP server, and
+# one console in front of them all. Model calls go to the agentgateway on the
+# host (port 4000).
+#
+#   docker compose up -d --build
+#   open http://localhost:8080   # the console: every agent in one UI
+#
+# Each agent also serves its own UI, for debugging: 3001, 3002, 3003.
+
+x-agent: &agent
+  image: agent-runtime
+  restart: unless-stopped
+  depends_on: [mcp-server]
+  extra_hosts: ["host.docker.internal:host-gateway"]
+  environment:
+    MODEL_BASE_URL: http://host.docker.internal:4000/v1
+    MCP_URL: http://mcp-server:8081/mcp
+  # Optional: ANTHROPIC_API_KEY, OPENAI_API_KEY, AGENT_MODEL, ... from .env
+  env_file: [{ path: .env, required: false }]
+
+services:
+  console:
+    build: { context: ., target: agent-console }
+    image: agent-console
+    restart: unless-stopped
+    environment:
+      CONSOLE_AGENTS: quokka=http://quokka:3000,trip-planner=http://trip-planner:3000,pirate=http://pirate:3000
+    ports: ["8080:8080"]
+
+  mcp-server:
+    build: { context: ., target: mcp-server }
+    image: mcp-server
+    restart: unless-stopped
+    environment:
+      MCP_ALLOWED_HOSTS: mcp-server,mcp-server:8081
+
+  quokka:
+    <<: *agent
+    build: { context: ., target: agent-runtime }
+    volumes: ["./agents/quokka:/agent:ro"]
+    ports: ["3001:3000"]
+
+  trip-planner:
+    <<: *agent
+    volumes: ["./agents/trip-planner:/agent:ro"]
+    ports: ["3002:3000"]
+
+  pirate:
+    <<: *agent
+    volumes: ["./agents/pirate:/agent:ro"]
+    ports: ["3003:3000"]
