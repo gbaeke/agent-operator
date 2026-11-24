@@ -32,7 +32,7 @@ From nothing to five running agents on a local [kind](https://kind.sigs.k8s.io) 
 ```sh
 kind/cluster.sh up                      # a kind cluster `agents`: 1 control plane, 2 workers
 deploy/deploy.sh                        # build the images, load them into kind, deploy the platform
-kubectl apply -f deploy/samples/        # quokka, trip-planner, pirate, learn, helpdesk
+kubectl apply -f deploy/samples/        # quokka, trip-planner, pirate, learn, helpdesk, analyst
 open http://localhost:32000             # the console
 
 cargo run -p agent-studio               # Agent Studio on http://127.0.0.1:8090
@@ -286,7 +286,7 @@ Agent and console serve the same `ui/index.html`. The console switches it to con
 
 ## Kubernetes
 
-The [quick start](#quick-start) has the commands and what you need. `deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner, pirate and learn (Microsoft Learn's MCP server). The platform:
+The [quick start](#quick-start) has the commands and what you need. `deploy.sh` installs the platform, but no agents; `deploy/samples/` has quokka, trip-planner, pirate, learn (Microsoft Learn's MCP server), helpdesk and analyst (runs Python with the `shell` tool). The platform:
 
 | Namespace | What |
 |---|---|
