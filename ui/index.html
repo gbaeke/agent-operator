@@ -65,7 +65,12 @@
   main { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 400px; min-height: 0; }
   body[data-mode="console"] main { grid-template-columns: 250px minmax(0, 1fr) 400px; }
   nav { display: none; border-right: var(--key) solid var(--rule); overflow-y: auto; padding: 14px 12px; }
-  body[data-mode="console"] nav { display: block; }
+  body[data-mode="console"] nav { display: flex; flex-direction: column; }
+  #agents { flex: 1; }
+  /* The signed-in user, at the foot of the agent list (only behind sign-in). */
+  #user { border-top: 1px solid var(--line); margin-top: 12px; padding: 12px 2px 0; font: 400 .8rem/1.5 var(--sans); color: var(--muted); }
+  #user .who { font: 600 .92rem var(--sans); color: var(--heading); }
+  #user a { color: var(--heading); font-weight: 600; }
   /* Section labels: a 1x1 brick seen from above */
   .label { display: flex; align-items: center; gap: 10px; font: 600 .84rem var(--sans); color: var(--heading); margin: 0 2px 12px; }
   .label::before { content: ""; width: 12px; height: 12px; border: 2px solid var(--rule); border-radius: 3px; background: var(--accent); flex: none; }
@@ -153,7 +158,7 @@
   <button id="reset" type="button">New chat</button>
 </header>
 <main>
-  <nav><div class="label">Agents</div><div id="agents"></div></nav>
+  <nav><div class="label">Agents</div><div id="agents"></div><div id="user" hidden></div></nav>
   <section id="chat">
     <div id="messages"></div>
     <form id="form">
@@ -357,6 +362,7 @@ async function send() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ session_id: view.sessionId, message: text }),
     });
+    if (signedOut(response)) return;
     // 409: a previous message of this chat is still running (maybe in another tab).
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
@@ -399,6 +405,13 @@ $("reset").onclick = async () => {
   show(fresh);
 };
 
+// Behind sign-in, a 401 means the session ended: a reload goes through sign-in again.
+function signedOut(response) {
+  if (response.status !== 401) return false;
+  location.reload();
+  return true;
+}
+
 // Console: the agent list, refreshed every 15 seconds. A view is made the
 // first time an agent is opened and kept while the page lives.
 let recheck;
@@ -406,7 +419,9 @@ async function loadAgents() {
   clearTimeout(recheck);
   let agents;
   try {
-    agents = await (await fetch("api/agents")).json();
+    const response = await fetch("api/agents");
+    if (signedOut(response)) return;
+    agents = await response.json();
   } catch {
     $("meta").textContent = "console not reachable";
     return;
@@ -445,6 +460,12 @@ if (MODE === "console") {
   $("brand-kind").textContent = ".console";
   $("title").textContent = "";
   loadAgents();
+  fetch("api/me").then((r) => r.json()).then(({ user, sign_out: signOut }) => {
+    if (!user) return;
+    const groups = user.groups.length ? ` · ${esc(user.groups.join(", "))}` : "";
+    $("user").innerHTML = `<div class="who">${esc(user.name ?? user.username)}</div><div>${esc(user.username)}${groups}</div><a href="${esc(signOut)}">Sign out</a>`;
+    $("user").hidden = false;
+  }).catch(() => {});
   // The console announces new, changed and deleted agents; the timer keeps
   // health up to date. A burst of changes reloads the list once.
   let pending;

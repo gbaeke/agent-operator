@@ -8,12 +8,14 @@
 # The console must be opened on the same host (http://$AUTH_HOST:32000).
 # It is fixed when Keycloak is first deployed; to change it, delete and apply.
 #
-#   deploy/auth.sh            apply and wait until Keycloak is ready
+#   deploy/auth.sh            apply, wait until Keycloak is ready, put sign-in on the console
 #   deploy/auth.sh users      print the demo users and their password
 #   deploy/auth.sh token U    a test access token for user U (agent-cli client)
-#   deploy/auth.sh delete     remove Keycloak, its data and the CoreDNS rewrite
+#   deploy/auth.sh delete     take sign-in off the console; remove Keycloak, its data and the CoreDNS rewrite
 #
-# It touches nothing in the `agents` namespace. KIND_CLUSTER picks the cluster (default: agents).
+# In the `agents` namespace it only adds the Secret console-oidc and patches the
+# console (deploy/auth/console-patch.yaml); delete undoes both.
+# KIND_CLUSTER picks the cluster (default: agents).
 set -euo pipefail
 
 CLUSTER="${KIND_CLUSTER:-agents}"
@@ -87,10 +89,11 @@ apply() {
   coredns_add
   k -n auth rollout status statefulset/postgres --timeout=180s
   k -n auth rollout status deploy/keycloak --timeout=300s
+  console_on
   echo
   echo "Keycloak admin: http://$HOST:32001/admin  (kcadmin / $(secret keycloak-admin password))"
   echo "issuer:         $ISSUER"
-  echo "console:        http://$HOST:32000 (sign-in arrives in step 2)"
+  echo "console:        http://$HOST:32000 (sign in as one of the users below)"
   users
 }
 
@@ -105,7 +108,31 @@ token() {
     python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])'
 }
 
+# oauth2-proxy in front of the console, and the console checking tokens.
+console_on() {
+  if ! k -n agents get secret console-oidc >/dev/null 2>&1; then
+    k -n agents create secret generic console-oidc \
+      --from-literal=OAUTH2_PROXY_CLIENT_SECRET="$(secret keycloak-realm console-client-secret)" \
+      --from-literal=OAUTH2_PROXY_COOKIE_SECRET="$(openssl rand -hex 16)" \
+      --from-literal=OAUTH2_PROXY_OIDC_ISSUER_URL="$ISSUER" \
+      --from-literal=OAUTH2_PROXY_REDIRECT_URL="http://$HOST:32000/oauth2/callback" \
+      --from-literal=OAUTH2_PROXY_BACKEND_LOGOUT_URL="$ISSUER/protocol/openid-connect/logout?id_token_hint={id_token}"
+  fi
+  k -n agents patch deployment agent-console --type strategic --patch-file "$DIR/console-patch.yaml" >/dev/null
+  k -n agents patch service agent-console --type strategic -p '{"spec":{"ports":[{"port":8080,"targetPort":4180}]}}' >/dev/null
+  k -n agents rollout status deploy/agent-console --timeout=120s
+}
+
+console_off() {
+  k -n agents get deployment agent-console >/dev/null 2>&1 || return 0
+  k -n agents patch service agent-console --type strategic -p '{"spec":{"ports":[{"port":8080,"targetPort":8080}]}}' >/dev/null
+  k -n agents patch deployment agent-console --type strategic --patch-file "$DIR/console-unpatch.yaml" >/dev/null
+  k -n agents delete --ignore-not-found secret console-oidc
+  k -n agents rollout status deploy/agent-console --timeout=120s
+}
+
 delete() {
+  console_off
   k delete --ignore-not-found namespace auth
   coredns_remove
 }
@@ -115,5 +142,5 @@ case "${1:-apply}" in
   users) users ;;
   token) token "${2:?usage: $0 token <user>}" ;;
   delete) delete ;;
-  *) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

@@ -1,0 +1,9 @@
+# Takes console-patch.yaml off the console again: no oauth2-proxy, no OIDC_ISSUER.
+spec:
+  template:
+    spec:
+      containers:
+        - name: console
+          env:
+            - { name: OIDC_ISSUER, $patch: delete }
+        - { name: oauth2-proxy, $patch: delete }

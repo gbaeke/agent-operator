@@ -1,0 +1,55 @@
+# Sign-in for the console, patched onto deploy/console.yaml by deploy/auth.sh
+# (and taken off again by console-unpatch.yaml on `deploy/auth.sh delete`).
+#
+# oauth2-proxy runs next to the console and the Service sends traffic to it
+# (port 4180). It signs users in with Keycloak, keeps the session in an
+# encrypted cookie (so console replicas share nothing), and passes each
+# request on to the console with the user's access token in
+# X-Forwarded-Access-Token. The console checks that token itself (OIDC_ISSUER).
+#
+# The Secret console-oidc, made by deploy/auth.sh, holds the client secret,
+# the cookie secret and the host-specific URLs as OAUTH2_PROXY_* variables.
+spec:
+  template:
+    spec:
+      containers:
+        - name: console
+          env:
+            - name: OIDC_ISSUER
+              valueFrom: { secretKeyRef: { name: console-oidc, key: OAUTH2_PROXY_OIDC_ISSUER_URL } }
+        - name: oauth2-proxy
+          image: quay.io/oauth2-proxy/oauth2-proxy:v7.13.0
+          imagePullPolicy: IfNotPresent
+          envFrom:
+            - secretRef: { name: console-oidc }
+          env:
+            - { name: OAUTH2_PROXY_PROVIDER, value: oidc }
+            - { name: OAUTH2_PROXY_CLIENT_ID, value: agent-console }
+            - { name: OAUTH2_PROXY_CODE_CHALLENGE_METHOD, value: S256 }
+            - { name: OAUTH2_PROXY_SKIP_PROVIDER_BUTTON, value: "true" }
+            - { name: OAUTH2_PROXY_EMAIL_DOMAINS, value: "*" }
+            - { name: OAUTH2_PROXY_HTTP_ADDRESS, value: "0.0.0.0:4180" }
+            - { name: OAUTH2_PROXY_UPSTREAMS, value: "http://127.0.0.1:8080" }
+            # Chat turns stream for minutes; don't cut them off.
+            - { name: OAUTH2_PROXY_UPSTREAM_TIMEOUT, value: 1h }
+            # The user's access token, for the console to check and pass on.
+            - { name: OAUTH2_PROXY_PASS_ACCESS_TOKEN, value: "true" }
+            # API calls get a 401 instead of a redirect to the login page; the UI reloads.
+            - { name: OAUTH2_PROXY_API_ROUTES, value: "^/api/" }
+            - { name: OAUTH2_PROXY_COOKIE_NAME, value: _agent_console }
+            # Plain HTTP on the tailnet / localhost.
+            - { name: OAUTH2_PROXY_COOKIE_SECURE, value: "false" }
+            - { name: OAUTH2_PROXY_COOKIE_EXPIRE, value: 8h }
+            # Refresh the access token (30 min) in the background while the user is active.
+            - { name: OAUTH2_PROXY_COOKIE_REFRESH, value: 5m }
+          ports: [{ name: proxy, containerPort: 4180 }]
+          readinessProbe: { httpGet: { path: /ping, port: 4180 }, periodSeconds: 5 }
+          livenessProbe: { httpGet: { path: /ping, port: 4180 }, periodSeconds: 20 }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          securityContext:
+            runAsUser: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
