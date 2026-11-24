@@ -27,12 +27,12 @@ Every agent in the cluster, with its plan, files and tool calls as it works. A `
 
 ## Quick start
 
-From nothing to four running agents on a local [kind](https://kind.sigs.k8s.io) cluster, in about two minutes:
+From nothing to five running agents on a local [kind](https://kind.sigs.k8s.io) cluster, in about two minutes:
 
 ```sh
 kind/cluster.sh up                      # a kind cluster `agents`: 1 control plane, 2 workers
 deploy/deploy.sh                        # build the images, load them into kind, deploy the platform
-kubectl apply -f deploy/samples/        # quokka, trip-planner, pirate, learn
+kubectl apply -f deploy/samples/        # quokka, trip-planner, pirate, learn, helpdesk
 open http://localhost:32000             # the console
 
 cargo run -p agent-studio               # Agent Studio on http://127.0.0.1:8090
@@ -440,7 +440,9 @@ spec:
     users: [bob]           # preferred_username
 ```
 
-Others don't see the agent in the console, and calls to it answer 404. Changing `access` does not restart the agent. Agent Studio has the same two fields. The next steps, passing the user's identity on to agents and MCP tools, are in [docs/todo.md](docs/todo.md).
+Others don't see the agent in the console, and calls to it answer 404. Changing `access` does not restart the agent. Agent Studio has the same two fields.
+
+The user's identity also reaches the tools. The console passes the user's token to the agent, the agent connects to its MCP servers with it for each turn, agentgateway lets only requests with a valid token through on `/mcp` (and removes it on `/learn/mcp`, before it leaves the cluster), and the MCP server checks it once more. Tools then know the caller: `whoami` returns them and `my_tickets` returns their own (made-up) tickets. Try the `helpdesk` sample: alice and bob asking "What are my open tickets?" get different answers. Chats belong to the user who started them. What is still open is in [docs/todo.md](docs/todo.md).
 
 ## Code map
 

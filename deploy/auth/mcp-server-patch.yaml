@@ -1,0 +1,9 @@
+# The shared MCP server checks user tokens too (OIDC_ISSUER: __ISSUER__ is filled in by
+# deploy/auth.sh); mcp-server-unpatch.yaml takes it off again.
+spec:
+  template:
+    spec:
+      containers:
+        - name: mcp-server
+          env:
+            - { name: OIDC_ISSUER, value: __ISSUER__ }

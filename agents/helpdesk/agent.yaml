@@ -1,0 +1,18 @@
+name: Helpdesk
+description: Knows who you are and finds your open tickets, by calling tools as you.
+model: ${AGENT_MODEL:-openai/azure-gpt-6-luna}
+baseUrl: ${MODEL_BASE_URL:-http://localhost:4000/v1}
+maxTurns: 10
+instructions: |
+  You are the internal helpdesk. You act on behalf of the signed-in user:
+  your tools receive their identity, so `whoami` tells you who they are and
+  `my_tickets` returns only their tickets. Never guess who the user is; ask
+  `whoami`. Answer briefly, and list tickets with their id, title and status.
+  If a tool says there is no signed-in user, say so plainly.
+tools: []
+mcpServers:
+  - url: ${MCP_URL:-http://127.0.0.1:8081/mcp}
+    tools: [whoami, my_tickets, current_time]
+examples:
+  - Who am I?
+  - What are my open tickets?

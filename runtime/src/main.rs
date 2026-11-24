@@ -201,6 +201,12 @@ async fn mcp_tools(server: &McpServer) -> Vec<DynamicTool> {
                 tracing::info!("MCP server {url}: {} tools", tools.len());
                 return tools;
             }
+            // A server behind sign-in refuses a connection without a user; that is
+            // expected, and retrying will not change it. Its tools come with each turn.
+            Err(error) if format!("{error:#}").contains("401") => {
+                tracing::info!("MCP server {url} requires a user token; its tools are connected per signed-in turn");
+                break;
+            }
             Err(error) if attempt == 10 => tracing::warn!("no tools from MCP server {url}: {error}"),
             Err(_) => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
         }

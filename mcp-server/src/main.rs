@@ -1,10 +1,17 @@
 //! A small MCP server with general-purpose tools, served over streamable HTTP.
 //!
 //! Tools: `calculate`, `current_time`, `get_weather` (Open-Meteo, no API key)
-//! and `fetch_url`. Run with `cargo run -p mcp-server`; it listens on
+//! and `fetch_url`, plus `whoami` and `my_tickets`, which act as the signed-in
+//! user (see `auth.rs`). Run with `cargo run -p mcp-server`; it listens on
 //! `MCP_ADDR` (default `127.0.0.1:8081`) at the path `/mcp`.
 
+mod auth;
+
 use std::time::Duration;
+
+use auth::Caller;
+use axum::http::request::Parts;
+use rmcp::handler::server::tool::Extension;
 
 use rmcp::{
     ErrorData, ServerHandler,
@@ -141,6 +148,61 @@ impl Toolbox {
             Err(error) => failure(format!("fetching {} failed: {error}", args.url)),
         })
     }
+
+    #[tool(
+        description = "Who the signed-in user is (username, name, email, groups), from the token this tool \
+                       call carried. Use it when the user asks who they are, or before acting on their behalf."
+    )]
+    async fn whoami(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
+        Ok(match parts.extensions.get::<Caller>() {
+            Some(caller) => text(serde_json::to_string_pretty(caller).unwrap_or_default()),
+            None => text("No signed-in user: this call carried no user token (the server runs without sign-in)."),
+        })
+    }
+
+    #[tool(
+        description = "The signed-in user's open tickets in the ticket system. Every user sees only their own. \
+                       (Demo data, made up per user and group.)"
+    )]
+    async fn my_tickets(&self, Extension(parts): Extension<Parts>) -> Result<CallToolResult, ErrorData> {
+        Ok(match parts.extensions.get::<Caller>() {
+            Some(caller) => text(serde_json::to_string_pretty(&tickets_for(caller)).unwrap_or_default()),
+            None => failure("my_tickets needs a signed-in user, and this call carried no user token."),
+        })
+    }
+}
+
+/// Made-up tickets for a user: by group, numbered from their username, so
+/// each user gets their own stable list, as a downstream system would return.
+fn tickets_for(caller: &Caller) -> Vec<Value> {
+    let by_group: &[(&str, &[(&str, &str)])] = &[
+        ("sales", &[
+            ("Quote for 200 Fleet Pro trackers for Contoso", "waiting on customer"),
+            ("Fabrikam asks for a renewal discount", "open"),
+        ]),
+        ("engineering", &[
+            ("Firmware 4.2 rollout stuck on 3% of devices", "in progress"),
+            ("Flaky integration test in fleet-api", "open"),
+        ]),
+        ("platform-admins", &[
+            ("Rotate the Keycloak admin password", "open"),
+            ("Postgres volume at 78%", "in progress"),
+        ]),
+    ];
+    let mut titles: Vec<(&str, &str)> = by_group
+        .iter()
+        .filter(|(group, _)| caller.groups.iter().any(|g| g == group))
+        .flat_map(|(_, tickets)| tickets.iter().copied())
+        .collect();
+    titles.push(("Laptop battery swells, replacement requested", "open"));
+    let base = caller.username.bytes().fold(1000u32, |n, b| (n * 31 + u32::from(b)) % 9000) + 1000;
+    titles
+        .into_iter()
+        .enumerate()
+        .map(|(i, (title, status))| {
+            json!({ "id": format!("TCK-{}", base + i as u32), "title": title, "status": status, "assignee": caller.username })
+        })
+        .collect()
 }
 
 impl Toolbox {
@@ -213,7 +275,10 @@ impl ServerHandler for Toolbox {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_protocol_version(ProtocolVersion::LATEST)
             .with_server_info(Implementation::new("quokka-tools", env!("CARGO_PKG_VERSION")))
-            .with_instructions("General-purpose tools: exact math, time zones, live weather and web page fetching.")
+            .with_instructions(
+                "General-purpose tools: exact math, time zones, live weather and web page fetching; \
+                 and, as the signed-in user, who they are and their tickets.",
+            )
     }
 }
 
@@ -240,8 +305,17 @@ async fn main() -> anyhow::Result<()> {
         .with_json_response(true)
         .with_allowed_hosts(allowed_hosts.split(',').map(str::trim).filter(|host| !host.is_empty()));
     let service = StreamableHttpService::new(|| Ok(Toolbox::new()), LocalSessionManager::default().into(), config);
+    // Every MCP request needs a valid user token when OIDC_ISSUER is set.
+    let verifier = auth::Verifier::from_env();
+    match &verifier {
+        Some(verifier) => tracing::info!("user tokens required; issuer {}", verifier.issuer()),
+        None => tracing::warn!("no OIDC_ISSUER: tools run without a user"),
+    }
+    let mcp = axum::Router::new()
+        .fallback_service(service)
+        .layer(axum::middleware::from_fn_with_state(verifier, auth::require_caller));
     let router = axum::Router::new()
-        .nest_service("/mcp", service)
+        .nest_service("/mcp", mcp)
         .route("/healthz", axum::routing::get(|| async { "ok" }));
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("MCP server listening on http://{addr}/mcp");
@@ -260,7 +334,27 @@ async fn shutdown_signal(mut terminate: Signal) {
 
 #[cfg(test)]
 mod tests {
-    use super::as_floats;
+    use super::*;
+
+    #[test]
+    fn tickets_follow_the_user() {
+        let caller = |name: &str, groups: &[&str]| Caller {
+            sub: name.into(),
+            username: name.into(),
+            name: None,
+            email: None,
+            groups: groups.iter().map(|g| g.to_string()).collect(),
+            expires_at: 0,
+            client: None,
+        };
+        let alice = tickets_for(&caller("alice", &["sales"]));
+        let bob = tickets_for(&caller("bob", &["engineering"]));
+        assert_eq!(alice.len(), 3);
+        assert!(alice[0]["title"].as_str().unwrap().contains("Contoso"));
+        assert!(bob[0]["title"].as_str().unwrap().contains("Firmware"));
+        assert_ne!(alice[0]["id"], bob[0]["id"]);
+        assert_eq!(alice, tickets_for(&caller("alice", &["sales"])));
+    }
 
     #[test]
     fn integer_division_is_exact() {

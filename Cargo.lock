@@ -4695,6 +4695,7 @@ dependencies = [
  "dotenvy",
  "evalexpr",
  "html2text",
+ "jsonwebtoken",
  "reqwest 0.13.5",
  "rmcp",
  "schemars 1.2.3",

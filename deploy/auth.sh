@@ -13,8 +13,10 @@
 #   deploy/auth.sh token U    a test access token for user U (agent-cli client)
 #   deploy/auth.sh delete     take sign-in off the console; remove Keycloak, its data and the CoreDNS rewrite
 #
-# In the `agents` namespace it only adds the Secret console-oidc and patches the
-# console (deploy/auth/console-patch.yaml); delete undoes both.
+# In the `agents` namespace it adds the Secret console-oidc, patches the console
+# (deploy/auth/console-patch.yaml) and the MCP server to check user tokens, and
+# adds gateway policies that require them on MCP routes (gateway-policy.yaml);
+# delete undoes all of it.
 # KIND_CLUSTER picks the cluster (default: agents).
 set -euo pipefail
 
@@ -90,6 +92,7 @@ apply() {
   k -n auth rollout status statefulset/postgres --timeout=180s
   k -n auth rollout status deploy/keycloak --timeout=300s
   console_on
+  tools_on
   echo
   echo "Keycloak admin: http://$HOST:32001/admin  (kcadmin / $(secret keycloak-admin password))"
   echo "issuer:         $ISSUER"
@@ -131,7 +134,24 @@ console_off() {
   k -n agents rollout status deploy/agent-console --timeout=120s
 }
 
+# User tokens required on the gateway's MCP routes and by the MCP server.
+JWKS="http://keycloak.auth.svc.cluster.local:32001/realms/agents/protocol/openid-connect/certs"
+tools_on() {
+  sed -e "s|__ISSUER__|$ISSUER|g" -e "s|__JWKS__|$JWKS|g" "$DIR/gateway-policy.yaml" | k apply -f - >/dev/null
+  k -n agents patch deployment mcp-server --type strategic -p "$(sed "s|__ISSUER__|$ISSUER|g" "$DIR/mcp-server-patch.yaml")" >/dev/null
+  k -n agents rollout status deploy/mcp-server --timeout=120s
+}
+
+tools_off() {
+  k -n agents delete --ignore-not-found agentgatewaypolicy mcp-user-token learn-user-token
+  if k -n agents get deployment mcp-server >/dev/null 2>&1; then
+    k -n agents patch deployment mcp-server --type strategic --patch-file "$DIR/mcp-server-unpatch.yaml" >/dev/null
+    k -n agents rollout status deploy/mcp-server --timeout=120s
+  fi
+}
+
 delete() {
+  tools_off
   console_off
   k delete --ignore-not-found namespace auth
   coredns_remove
@@ -142,5 +162,5 @@ case "${1:-apply}" in
   users) users ;;
   token) token "${2:?usage: $0 token <user>}" ;;
   delete) delete ;;
-  *) sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac

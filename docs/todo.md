@@ -41,7 +41,7 @@ Steps, each one demoable:
 2. oauth2-proxy sidecar and JWT check in the console; the UI shows who is signed in and has sign-out. **Done:** `deploy/auth.sh` patches the console (`deploy/auth/console-patch.yaml`) and `delete` takes it off again.
 3. `spec.access` in the CRD, operator and Studio; console filtering. **Done.**
 4. Runtime: token on per-turn MCP connections, session owners. **Done:** the console sends `Authorization: Bearer`; with it the runtime connects its MCP servers per turn as the user, and sessions (`agent_workspaces.owner`) refuse other users with 403. The runtime reads `sub` without checking the token (only the console can reach it); step 7 checks it.
-5. Gateway JWT policy on `/mcp`, MCP server JWT check, `whoami` and `my_tickets`.
+5. Gateway JWT policy on `/mcp`, MCP server JWT check, `whoami` and `my_tickets`. **Done:** `deploy/auth/gateway-policy.yaml` requires a user token on `/mcp` (kept for the server) and on `/learn/mcp` (removed before it leaves the cluster); the MCP server checks it again; the `helpdesk` sample shows tools acting as the user.
 6. MCP tool authorization per group in the gateway.
 7. Later: token exchange at the gateway (`backend.auth.oauthTokenExchange`, audience `mcp-server`) instead of passthrough, and agents validating the token themselves.
 

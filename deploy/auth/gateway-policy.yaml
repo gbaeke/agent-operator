@@ -1,0 +1,42 @@
+# User tokens on MCP traffic, applied by deploy/auth.sh (__ISSUER__ and __JWKS__ are
+# filled in by it) and deleted again by `deploy/auth.sh delete`.
+#
+# /mcp (the shared MCP server): only requests with a valid user token pass,
+# and the token stays on the request, so the server knows the user too.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: mcp-user-token
+  namespace: agents
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: HTTPRoute, name: mcp }
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      preserveToken: true
+      providers:
+        - issuer: __ISSUER__
+          audiences: [agent-platform]
+          jwks:
+            remote: { url: __JWKS__, cacheDuration: 5m }
+---
+# /learn/mcp (Microsoft Learn, outside the cluster): the token is checked and
+# then removed, so it never leaves for a server that has no use for it.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: learn-user-token
+  namespace: agents
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: HTTPRoute, name: microsoft-learn }
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      preserveToken: false
+      providers:
+        - issuer: __ISSUER__
+          audiences: [agent-platform]
+          jwks:
+            remote: { url: __JWKS__, cacheDuration: 5m }
