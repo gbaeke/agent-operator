@@ -144,7 +144,7 @@ tools_on() {
 }
 
 tools_off() {
-  k -n agents delete --ignore-not-found agentgatewaypolicy mcp-user-token learn-user-token
+  k -n agents delete --ignore-not-found agentgatewaypolicy mcp-user-token learn-user-token huggingface-user-token
   if k -n agents get deployment mcp-server >/dev/null 2>&1; then
     k -n agents patch deployment mcp-server --type strategic --patch-file "$DIR/mcp-server-unpatch.yaml" >/dev/null
     k -n agents rollout status deploy/mcp-server --timeout=120s

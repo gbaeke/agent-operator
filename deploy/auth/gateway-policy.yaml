@@ -40,3 +40,22 @@ spec:
           audiences: [agent-platform]
           jwks:
             remote: { url: __JWKS__, cacheDuration: 5m }
+---
+# /huggingface/mcp (Hugging Face, outside the cluster): checked and removed, as for Learn.
+apiVersion: agentgateway.dev/v1alpha1
+kind: AgentgatewayPolicy
+metadata:
+  name: huggingface-user-token
+  namespace: agents
+spec:
+  targetRefs:
+    - { group: gateway.networking.k8s.io, kind: HTTPRoute, name: huggingface }
+  traffic:
+    jwtAuthentication:
+      mode: Strict
+      preserveToken: false
+      providers:
+        - issuer: __ISSUER__
+          audiences: [agent-platform]
+          jwks:
+            remote: { url: __JWKS__, cacheDuration: 5m }
