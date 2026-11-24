@@ -228,8 +228,10 @@
 const $ = (id) => document.getElementById(id);
 const TOOLS = [
   ["planning", "write_todos"], ["files", "ls · read · write"], ["knowledge", "search docs"],
-  ["skills", "load_skill"], ["subagents", "task"],
+  ["skills", "load_skill"], ["subagents", "task"], ["shell", "sh · python3"],
 ];
+// What an agent gets without a `tools` list: everything but the shell, which must be listed.
+const DEFAULT_TOOLS = TOOLS.map(([id]) => id).filter((id) => id !== "shell");
 const STARTERS = {
   blank: { label: "Blank", display: "", description: "", instructions: "", tools: ["planning", "files"], mcp: [], examples: [] },
   learn: {
@@ -323,7 +325,7 @@ function fill({ name = "", spec = {}, skills: s = [], existingSkills = [], knowl
   $("f-description").value = spec.description || "";
   setModel(spec.model || options.models[0]);
   $("f-instructions").value = spec.instructions || "";
-  const tools = spec.tools ?? TOOLS.map(([id]) => id);
+  const tools = spec.tools ?? DEFAULT_TOOLS;
   TOOLS.forEach(([id]) => $(`tool-${id}`).checked = tools.includes(id));
   const urls = (spec.mcpServers || []).map((m) => m.url);
   $("mcp").querySelectorAll("input").forEach((c) => c.checked = urls.includes(c.dataset.url));
@@ -372,7 +374,8 @@ function collect() {
   set("model", $("f-model").value);
   set("instructions", $("f-instructions").value.trim());
   const tools = TOOLS.map(([id]) => id).filter((id) => $(`tool-${id}`).checked);
-  if (tools.length === TOOLS.length) delete spec.tools; else spec.tools = tools;
+  const isDefault = tools.length === DEFAULT_TOOLS.length && DEFAULT_TOOLS.every((id) => tools.includes(id));
+  if (isDefault) delete spec.tools; else spec.tools = tools;
   // Keep a server's tool allowlist from the loaded spec when its URL stays.
   const previous = Object.fromEntries((baseSpec.mcpServers || []).map((m) => [m.url, m]));
   const urls = [...$("mcp").querySelectorAll("input:checked")].map((c) => c.dataset.url)
