@@ -7,7 +7,8 @@
 //!                                     print an agent folder as an Agent and its ConfigMaps
 //! ```
 //!
-//! Settings: `AGENT_IMAGE` (default `agent-runtime:dev`), `DEFAULT_BASE_URL`
+//! Settings: `AGENT_IMAGE` (default `agent-runtime:dev`), `AGENT_SHELL_IMAGE`
+//! (default `agent-runtime-python:dev`, for agents that list `shell`), `DEFAULT_BASE_URL`
 //! (the model gateway for agents that set no `baseUrl`), `AGENT_ENV_<NAME>`
 //! (passed to every agent pod as `<NAME>`), `SESSION_DATABASE_SECRET` (a
 //! Secret whose `url` becomes the pods' `DATABASE_URL`, with a schema per
@@ -93,6 +94,7 @@ mod tests {
         let settings =
             reconcile::Settings {
                 image: "x".into(),
+                shell_image: "y".into(),
                 default_base_url: Some("http://gw/v1".into()),
                 agent_env: Vec::new(),
                 session_secret: None,

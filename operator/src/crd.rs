@@ -36,7 +36,8 @@ pub struct AgentSpec {
     /// Pods to run. More than 1 needs the operator's session database, so any pod can serve any chat.
     #[serde(default = "one")]
     pub replicas: i32,
-    /// The agent-runtime image. Defaults to the operator's.
+    /// The agent-runtime image. Defaults to the operator's: `AGENT_SHELL_IMAGE`
+    /// (with a shell and Python) when `tools` lists `shell`, else `AGENT_IMAGE`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     /// Extra environment variables, e.g. an API key from a Secret.

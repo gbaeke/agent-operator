@@ -408,7 +408,7 @@ It uses your kubeconfig and only listens on 127.0.0.1. Settings: `STUDIO_CONTEXT
 For each `Agent`, with server-side apply and owner references, so deleting the Agent deletes them:
 
 - ConfigMap `<name>-agent`: the generated agent.yaml (the display name defaults to the resource name);
-- Deployment `<name>`: agent-runtime with one projected volume at `/agent`, in the folder layout the runtime reads (`agent.yaml`, `skills/<name>/...`, `knowledge/...`); non-root, read-only root filesystem, probes on `/readyz` and `/healthz`, 120s for running turns to finish on a rollout;
+- Deployment `<name>`: agent-runtime with one projected volume at `/agent`, in the folder layout the runtime reads (`agent.yaml`, `skills/<name>/...`, `knowledge/...`); non-root, read-only root filesystem, probes on `/readyz` and `/healthz`, 120s for running turns to finish on a rollout. An agent that lists the `shell` tool also gets `AGENT_SHELL_IMAGE` (unless it sets `image`), a 1Gi `emptyDir` at `/tmp` and a 512Mi memory limit instead of 256Mi;
 - Service `<name>`: port 3000, cluster-internal only.
 
 A hash of everything mounted is in the pod template, so editing the spec or a referenced ConfigMap rolls the pods. `status.ready` turns true when a rollout is complete; `status.message` says what is missing or how far a rollout is; `status.url` is the in-cluster URL the console uses; `status.model` is the model with its placeholders resolved, as the pods will see it (the MODEL column).
@@ -416,6 +416,7 @@ A hash of everything mounted is in the pod template, so editing the spec or a re
 | Operator setting | Default |
 |---|---|
 | `AGENT_IMAGE` | `agent-runtime:dev` |
+| `AGENT_SHELL_IMAGE` | `agent-runtime-python:dev`: for agents that list `shell` and set no `image` |
 | `DEFAULT_BASE_URL` | unset; the deployment sets the gateway, `http://agentgateway.agents:8080/v1` |
 | `AGENT_ENV_<NAME>` | passed to every agent pod as `<NAME>`; an Agent's own `env` wins. The deployment sets `MODEL_BASE_URL`, `MCP_URL` and `LEARN_MCP_URL`, all through the gateway |
 | `SESSION_DATABASE_SECRET` | unset (sessions in memory); the deployment sets `agent-sessions`. Its `url` key becomes the pods' `DATABASE_URL` |

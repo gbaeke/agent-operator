@@ -168,7 +168,9 @@ spec:
                   type: string
                 type: array
               image:
-                description: The agent-runtime image. Defaults to the operator's.
+                description: |-
+                  The agent-runtime image. Defaults to the operator's: `AGENT_SHELL_IMAGE`
+                  (with a shell and Python) when `tools` lists `shell`, else `AGENT_IMAGE`.
                 nullable: true
                 type: string
               instructions:

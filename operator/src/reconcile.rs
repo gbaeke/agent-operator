@@ -18,7 +18,8 @@ use std::time::Duration;
 use futures::StreamExt;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Capabilities, ConfigMap, ConfigMapProjection, Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction,
+    Capabilities, ConfigMap, ConfigMapProjection, Container, ContainerPort, EmptyDirVolumeSource, EnvVar, EnvVarSource,
+    HTTPGetAction,
     KeyToPath, ObjectFieldSelector, SecretKeySelector, PodSecurityContext, PodSpec, PodTemplateSpec, Probe, ProjectedVolumeSource,
     ResourceRequirements, SeccompProfile, SecurityContext, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
     VolumeProjection,
@@ -34,6 +35,7 @@ use kube::{Api, Client, Resource, ResourceExt};
 use serde_json::json;
 
 use crate::crd::{Agent, AgentStatus};
+use agent_spec::Builtin;
 
 const MANAGER: &str = "agent-operator";
 const PORT: i32 = 3000;
@@ -43,6 +45,9 @@ const HASH_ANNOTATION: &str = "agents.baeke.info/config-hash";
 pub struct Settings {
     /// The agent-runtime image for agents that name none (`AGENT_IMAGE`).
     pub image: String,
+    /// The image for agents that list the `shell` tool and name none
+    /// (`AGENT_SHELL_IMAGE`): agent-runtime with a shell and Python.
+    pub shell_image: String,
     /// `baseUrl` for agents that set none (`DEFAULT_BASE_URL`), e.g. a gateway.
     pub default_base_url: Option<String>,
     /// Environment for every agent pod, from `AGENT_ENV_<NAME>=value`: the
@@ -62,6 +67,7 @@ impl Settings {
     pub fn from_env() -> Self {
         Self {
             image: std::env::var("AGENT_IMAGE").unwrap_or_else(|_| "agent-runtime:dev".to_owned()),
+            shell_image: std::env::var("AGENT_SHELL_IMAGE").unwrap_or_else(|_| "agent-runtime-python:dev".to_owned()),
             default_base_url: std::env::var("DEFAULT_BASE_URL").ok().filter(|url| !url.is_empty()),
             agent_env: std::env::vars()
                 .filter_map(|(key, value)| Some((key.strip_prefix("AGENT_ENV_")?.to_owned(), value)))
@@ -435,27 +441,48 @@ fn deployment(
         period_seconds: Some(period),
         ..Default::default()
     };
+    // An agent with a shell runs programs: it gets an image with a shell, a
+    // writable /tmp for their files, and more memory.
+    let shell = agent.spec.agent.tools.as_ref().is_some_and(|tools| tools.contains(&Builtin::Shell));
+    let default_image = if shell { &settings.shell_image } else { &settings.image };
+    let memory_limit = if shell { "512Mi" } else { "256Mi" };
     let resources = agent.spec.resources.clone().unwrap_or_else(|| ResourceRequirements {
         requests: Some(BTreeMap::from([
             ("cpu".to_owned(), Quantity("50m".to_owned())),
             ("memory".to_owned(), Quantity("64Mi".to_owned())),
         ])),
-        limits: Some(BTreeMap::from([("memory".to_owned(), Quantity("256Mi".to_owned()))])),
+        limits: Some(BTreeMap::from([("memory".to_owned(), Quantity(memory_limit.to_owned()))])),
         ..Default::default()
     });
 
+    let mut mounts = vec![VolumeMount {
+        name: "agent".to_owned(),
+        mount_path: "/agent".to_owned(),
+        read_only: Some(true),
+        ..Default::default()
+    }];
+    let mut volumes = vec![Volume {
+        name: "agent".to_owned(),
+        projected: Some(ProjectedVolumeSource { sources: Some(sources), ..Default::default() }),
+        ..Default::default()
+    }];
+    if shell {
+        // The session folders (`/tmp/agent-sessions`) and the programs' temporary files.
+        mounts.push(VolumeMount { name: "tmp".to_owned(), mount_path: "/tmp".to_owned(), ..Default::default() });
+        volumes.push(Volume {
+            name: "tmp".to_owned(),
+            empty_dir: Some(EmptyDirVolumeSource { size_limit: Some(Quantity("1Gi".to_owned())), ..Default::default() }),
+            ..Default::default()
+        });
+    }
+
     let container = Container {
         name: "agent".to_owned(),
-        image: Some(agent.spec.image.clone().unwrap_or_else(|| settings.image.clone())),
+        image: Some(agent.spec.image.clone().unwrap_or_else(|| default_image.clone())),
         image_pull_policy: Some("IfNotPresent".to_owned()),
         ports: Some(vec![ContainerPort { name: Some("http".to_owned()), container_port: PORT, ..Default::default() }]),
         env: Some(env),
-        volume_mounts: Some(vec![VolumeMount {
-            name: "agent".to_owned(),
-            mount_path: "/agent".to_owned(),
-            read_only: Some(true),
-            ..Default::default()
-        }]),
+        volume_mounts: Some(mounts),
         readiness_probe: Some(probe("/readyz", 5)),
         liveness_probe: Some(probe("/healthz", 20)),
         resources: Some(resources),
@@ -486,11 +513,7 @@ fn deployment(
                 }),
                 spec: Some(PodSpec {
                     containers: vec![container],
-                    volumes: Some(vec![Volume {
-                        name: "agent".to_owned(),
-                        projected: Some(ProjectedVolumeSource { sources: Some(sources), ..Default::default() }),
-                        ..Default::default()
-                    }]),
+                    volumes: Some(volumes),
                     security_context: Some(PodSecurityContext {
                         run_as_non_root: Some(true),
                         seccomp_profile: Some(SeccompProfile { type_: "RuntimeDefault".to_owned(), ..Default::default() }),
@@ -545,6 +568,7 @@ mod tests {
     fn mounts_the_agent_folder_layout() {
         let settings = Settings {
             image: "agent-runtime:dev".into(),
+            shell_image: "agent-runtime-python:dev".into(),
             default_base_url: None,
             agent_env: vec![("MCP_URL".into(), "http://mcp-server.agents:8081/mcp".into())],
             session_secret: Some("agent-sessions".into()),
@@ -574,9 +598,43 @@ mod tests {
     }
 
     #[test]
+    fn agents_with_a_shell_get_its_image_and_a_writable_tmp() {
+        let settings = Settings {
+            image: "agent-runtime:dev".into(),
+            shell_image: "agent-runtime-python:dev".into(),
+            default_base_url: None,
+            agent_env: Vec::new(),
+            session_secret: None,
+            models_namespace: None,
+        };
+        let pod = |spec: serde_json::Value| {
+            let agent = Agent::new("coder", serde_json::from_value(spec).unwrap());
+            deployment(&agent, &settings, "coder-agent", &[], None, "hash").spec.unwrap().template.spec.unwrap()
+        };
+        let mounts = |pod: &PodSpec| -> Vec<String> {
+            pod.containers[0].volume_mounts.iter().flatten().map(|mount| mount.mount_path.clone()).collect()
+        };
+        let limit = |pod: &PodSpec| pod.containers[0].resources.as_ref().unwrap().limits.as_ref().unwrap()["memory"].0.clone();
+
+        let plain = pod(json!({}));
+        assert_eq!(plain.containers[0].image.as_deref(), Some("agent-runtime:dev"));
+        assert_eq!(mounts(&plain), ["/agent"]);
+        assert_eq!(limit(&plain), "256Mi");
+
+        let shell = pod(json!({ "tools": ["files", "shell"] }));
+        assert_eq!(shell.containers[0].image.as_deref(), Some("agent-runtime-python:dev"));
+        assert_eq!(mounts(&shell), ["/agent", "/tmp"]);
+        assert_eq!(limit(&shell), "512Mi");
+
+        let own = pod(json!({ "tools": ["shell"], "image": "my-runtime:1" }));
+        assert_eq!(own.containers[0].image.as_deref(), Some("my-runtime:1"));
+    }
+
+    #[test]
     fn resolves_placeholders_like_the_pod() {
         let settings = Settings {
             image: String::new(),
+            shell_image: String::new(),
             default_base_url: None,
             agent_env: vec![("AGENT_MODEL".into(), "openai/azure-gpt-6.1-sol".into())],
             session_secret: None,

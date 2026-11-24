@@ -68,6 +68,8 @@ spec:
           imagePullPolicy: IfNotPresent
           env:
             - { name: AGENT_IMAGE, value: "agent-runtime:dev" }
+            # For agents that list the `shell` tool and name no image.
+            - { name: AGENT_SHELL_IMAGE, value: "agent-runtime-python:dev" }
             # The in-cluster agentgateway: models on /v1, the MCP server on /mcp.
             - { name: DEFAULT_BASE_URL, value: "http://agentgateway.agents:8080/v1" }
             - { name: GATEWAY_MODELS_NAMESPACE, value: agents }
