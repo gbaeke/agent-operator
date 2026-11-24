@@ -13,39 +13,9 @@ Skills are now ConfigMaps that one Agent references by name. `render` names them
 - The operator mounts it at `skills/<name>/` as it does now, and a change to a Skill rolls every Agent that uses it. The config hash already covers mounted content.
 - Optional: allow subfolders inside a skill, which ConfigMaps cannot hold.
 
-### Sign-in, and the user's token passed on to agents and MCP servers
+### Sign-in and user identity
 
-The console is open to anyone who can reach port 32000, and agents and MCP servers act as nobody in particular. Users should sign in, see only the agents they may use, and their identity should reach every MCP tool call, so a tool can act as that user.
-
-```
-browser ──login──► Keycloak (users, groups)
-   │ cookie
-oauth2-proxy ─► console ── Bearer <user token> ──► agent ──► agentgateway ──► mcp-server
-                checks JWT,                    token on      checks JWT,      checks JWT,
-                filters agents                 MCP calls     tool rules       tools read claims
-```
-
-Decided:
-
-- **Keycloak** in its own namespace `auth`, realm `agents` imported from git, with its own small Postgres so it survives restarts and removes cleanly. Users `alice` (sales), `bob` (engineering), `admin` (platform-admins).
-- **One issuer URL everywhere:** Keycloak's hostname is the name the browser uses for this machine, port 32001 (`AUTH_HOST`: the tailnet name, else `keycloak.localtest.me`, which is 127.0.0.1), and a CoreDNS rewrite sends the same name to the Keycloak Service inside the cluster, which also listens on 32001.
-- **oauth2-proxy as a sidecar** of the console handles login, refresh and logout, with the session in encrypted cookies so console replicas share nothing. The console still validates the JWT (issuer, audience `agent-platform`, expiry). Without OIDC settings the console runs open, as now.
-- **`spec.access` on the Agent:** `groups` and `users`; absent means every signed-in user. `platform-admins` sees everything. The console filters `/api/agents` and refuses `forward` for others. Agent Studio gets the field.
-- **Token on every MCP call:** the runtime opens an MCP connection per chat turn with the user's token (today one connection is made at startup and shared). Sessions store their owner (`sub`) and refuse other users.
-- **Gateway:** an `AgentgatewayPolicy` on `/mcp` with `jwtAuthentication` (Strict, `preserveToken`), and `backend.mcp.authorization` rules on `jwt.groups` per tool.
-- **MCP server:** validates the JWT again and exposes the claims to tools; new tools `whoami` and `my_tickets` (fake per-user data).
-
-Steps, each one demoable:
-
-1. Keycloak on kind: namespace, Postgres, realm, CoreDNS rewrite (`deploy/auth.sh`). **Done.**
-2. oauth2-proxy sidecar and JWT check in the console; the UI shows who is signed in and has sign-out. **Done:** `deploy/auth.sh` patches the console (`deploy/auth/console-patch.yaml`) and `delete` takes it off again.
-3. `spec.access` in the CRD, operator and Studio; console filtering. **Done.**
-4. Runtime: token on per-turn MCP connections, session owners. **Done:** the console sends `Authorization: Bearer`; with it the runtime connects its MCP servers per turn as the user, and sessions (`agent_workspaces.owner`) refuse other users with 403. The runtime reads `sub` without checking the token (only the console can reach it); step 7 checks it.
-5. Gateway JWT policy on `/mcp`, MCP server JWT check, `whoami` and `my_tickets`. **Done:** `deploy/auth/gateway-policy.yaml` requires a user token on `/mcp` (kept for the server) and on `/learn/mcp` (removed before it leaves the cluster); the MCP server checks it again; the `helpdesk` sample shows tools acting as the user.
-6. MCP tool authorization per group in the gateway.
-7. Later: token exchange at the gateway (`backend.auth.oauthTokenExchange`, audience `mcp-server`) instead of passthrough, and agents validating the token themselves.
-
-Watch out for: a token is sent when a turn starts, so a long turn can outlive it (access tokens last 30 minutes for now; token exchange or refresh fixes it properly). Keep tokens out of logs, session storage and the Agent's status.
+Sign-in on the console, agents per user or group, and the user's identity passed to MCP tools: steps 1 to 5 are done (`deploy/auth.sh`). What is next (tool rules per group, agents checking tokens, token exchange) and the loose ends are in [todo-auth.md](todo-auth.md).
 
 ### A2A support in the runtime
 
