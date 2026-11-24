@@ -17,6 +17,14 @@ Skills are now ConfigMaps that one Agent references by name. `render` names them
 
 Sign-in on the console, agents per user or group, and the user's identity passed to MCP tools: steps 1 to 5 are done (`deploy/auth.sh`). What is next (tool rules per group, agents checking tokens, token exchange) and the loose ends are in [todo-auth.md](todo-auth.md).
 
+### Agents in other namespaces
+
+The operator watches Agents in every namespace, but the NetworkPolicies (`deploy/network-policies.yaml`) only exist in `agents`; the operator creates none. An Agent elsewhere, say `team-a`, runs without any: it can reach the internet and the whole cluster, and any pod can call it. And it does not work: `gateway-ingress` and `postgres-ingress` only admit agents from `agents`, so it gets no models, MCP tools or sessions.
+
+- Let the operator apply an egress and an ingress NetworkPolicy per Agent (owned by it, like the Deployment), the same rules as `agent-egress` and `agent-ingress` but pointing at the gateway, Postgres and console in `agents`.
+- Admit those namespaces in `gateway-ingress` and `postgres-ingress`, for example with a namespace label such as `agents.baeke.info/enabled: "true"`.
+- Until then: run Agents in `agents` only.
+
 ### A2A support in the runtime
 
 The runtime speaks its own API (`/v1/info`, `/v1/chat` as an event stream). A2A, the agent-to-agent protocol, would let other agents and tools call ours, and let us run the runtime as a kagent BYO agent, which must serve A2A on port 8080. See [agent-specs.md](agent-specs.md).
