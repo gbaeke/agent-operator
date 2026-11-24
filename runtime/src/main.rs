@@ -8,6 +8,12 @@
 //!
 //! The folder is the argument, else `$AGENT_DIR`, else the working directory.
 //! `--check` loads and validates it, prints what the agent would get, and exits.
+//!
+//! Identity: a request may carry the user's token (`Authorization: Bearer`,
+//! sent by the console when sign-in is on). The runtime then connects to its
+//! MCP servers for that turn with the user's token, so every tool call is made
+//! as the user, and the session belongs to that user (the token's `sub`).
+//! Without a token the MCP connections made at startup are shared, as before.
 
 mod config;
 mod events;
@@ -21,7 +27,7 @@ use std::sync::Arc;
 
 use anyhow::Context;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -40,6 +46,7 @@ use rig::tool::rmcp::McpConnection;
 use rmcp::ServiceExt;
 use rmcp::model::{ClientCapabilities, ClientConfig, Implementation, ProtocolVersion};
 use rmcp::transport::StreamableHttpClientTransport;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::signal::unix::{Signal, SignalKind, signal};
@@ -59,13 +66,17 @@ struct AppState {
     knowledge: Option<Arc<kb::KnowledgeBase>>,
     skills: Option<Arc<Vec<skills::Skill>>>,
     subagents: Arc<Vec<Subagent>>,
-    mcp_tools: Vec<DynamicTool>,
+    /// Connected at startup without a user, for requests that carry no token.
+    shared_mcp_tools: Vec<DynamicTool>,
+    /// The MCP tool names last seen, for `/v1/info`.
+    mcp_tool_names: std::sync::RwLock<Vec<String>>,
     store: Store,
 }
 
 impl AppState {
-    /// The main agent for one run, its tools bound to the session's workspace.
-    fn agent(&self, workspace: &SharedWorkspace, events: EventSender) -> Agent {
+    /// The main agent for one run, its tools bound to the session's workspace
+    /// and its MCP tools connected for this run's user.
+    fn agent(&self, workspace: &SharedWorkspace, events: EventSender, mcp: Vec<DynamicTool>) -> Agent {
         let bundle = &self.bundle;
         let mut builder = AgentBuilder::new(self.model.clone())
             .preamble(&self.system_prompt)
@@ -98,13 +109,42 @@ impl AppState {
                 tools: SubagentTools {
                     knowledge: self.knowledge.clone(),
                     skills: self.skills.clone(),
-                    mcp: self.mcp_tools.clone(),
+                    mcp: mcp.clone(),
                 },
                 events,
             });
         }
-        builder.dynamic_tools(self.mcp_tools.clone()).build()
+        builder.dynamic_tools(mcp).build()
     }
+
+    /// The MCP tools for one turn: connected with the user's token when there
+    /// is one, so every call is made as that user; else the shared ones.
+    async fn mcp_tools_for(&self, token: Option<&str>) -> Vec<DynamicTool> {
+        let Some(token) = token else {
+            return self.shared_mcp_tools.clone();
+        };
+        let servers = &self.bundle.config.mcp_servers;
+        let tools: Vec<DynamicTool> =
+            futures::future::join_all(servers.iter().map(|server| user_mcp_tools(server, token))).await.into_iter().flatten().collect();
+        *self.mcp_tool_names.write().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            tools.iter().map(|tool| tool.name().to_string()).collect();
+        tools
+    }
+}
+
+/// The bearer token of a request, if it has one.
+fn bearer(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::AUTHORIZATION)?.to_str().ok()?.strip_prefix("Bearer ").filter(|token| !token.is_empty())
+}
+
+/// The user a token names (its `sub`). The token is not checked here: only the
+/// console, which checks it, can reach an agent (network policy).
+fn subject(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload.trim_end_matches('=')).ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    claims.get("sub")?.as_str().map(str::to_owned)
 }
 
 /// A completion model from a `vendor/model` reference, keyed from the
@@ -124,7 +164,8 @@ fn connect_model(model: &str, base_url: Option<&str>) -> anyhow::Result<DynModel
     .with_context(|| format!("model `{model}` via {url}"))
 }
 
-async fn connect_mcp(url: &str) -> anyhow::Result<Vec<DynamicTool>> {
+/// Connects to an MCP server, as the user when a token is given, and lists its tools.
+async fn connect_mcp(url: &str, token: Option<&str>) -> anyhow::Result<Vec<DynamicTool>> {
     // The newest protocol version with `initialize`: rmcp offers a newer one
     // by default, which agentgateway refuses on an `initialize` request.
     let config = ClientConfig::new(
@@ -132,7 +173,11 @@ async fn connect_mcp(url: &str) -> anyhow::Result<Vec<DynamicTool>> {
         Implementation::new("agent-runtime", env!("CARGO_PKG_VERSION")),
     )
     .with_protocol_version(ProtocolVersion::LATEST_WITH_INITIALIZE);
-    let transport = StreamableHttpClientTransport::from_uri(url);
+    let mut transport = StreamableHttpClientTransportConfig::with_uri(url);
+    if let Some(token) = token {
+        transport = transport.auth_header(token);
+    }
+    let transport = StreamableHttpClientTransport::from_config(transport);
     // The tools hold the connection open for as long as they live.
     let connection = McpConnection::new(config.serve(transport).await?);
     connection
@@ -149,12 +194,10 @@ async fn mcp_tools(server: &McpServer) -> Vec<DynamicTool> {
     let url = &server.url;
     for attempt in 1..=10 {
         // Capped: a connect to a pod that is going away can otherwise hang for 30s.
-        let connect = tokio::time::timeout(std::time::Duration::from_secs(2), connect_mcp(url));
+        let connect = tokio::time::timeout(std::time::Duration::from_secs(2), connect_mcp(url, None));
         match connect.await.unwrap_or_else(|_| Err(anyhow::anyhow!("timed out"))) {
-            Ok(mut tools) => {
-                if let Some(allowed) = &server.tools {
-                    tools.retain(|tool| allowed.iter().any(|name| name == tool.name()));
-                }
+            Ok(tools) => {
+                let tools = allowed(server, tools);
                 tracing::info!("MCP server {url}: {} tools", tools.len());
                 return tools;
             }
@@ -163,6 +206,28 @@ async fn mcp_tools(server: &McpServer) -> Vec<DynamicTool> {
         }
     }
     Vec::new()
+}
+
+/// One server's tools for one turn, connected with the user's token. A
+/// server that fails is left out of the turn, not replaced by the shared
+/// connection: tools must not run as nobody when a user is known.
+async fn user_mcp_tools(server: &McpServer, token: &str) -> Vec<DynamicTool> {
+    let connect = tokio::time::timeout(std::time::Duration::from_secs(5), connect_mcp(&server.url, Some(token)));
+    match connect.await.unwrap_or_else(|_| Err(anyhow::anyhow!("timed out"))) {
+        Ok(tools) => allowed(server, tools),
+        Err(error) => {
+            tracing::warn!("no tools from MCP server {} for this turn: {error}", server.url);
+            Vec::new()
+        }
+    }
+}
+
+/// Only the tools the server's allowlist names, if it has one.
+fn allowed(server: &McpServer, mut tools: Vec<DynamicTool>) -> Vec<DynamicTool> {
+    if let Some(allowed) = &server.tools {
+        tools.retain(|tool| allowed.iter().any(|name| name == tool.name()));
+    }
+    tools
 }
 
 #[derive(Deserialize)]
@@ -184,8 +249,15 @@ fn internal_error(error: anyhow::Error) -> Response {
 /// Runs the agent on one message and streams what happens as SSE events.
 /// The history is loaded before the first model call and saved when the turn
 /// succeeds; the workspace is saved after every tool result.
-async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatRequest>) -> Response {
+async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(request): Json<ChatRequest>) -> Response {
     let session_id = request.session_id.clone();
+    let token = bearer(&headers);
+    // The session is the user's: a new one becomes theirs, someone else's is refused.
+    match state.store.touch(&session_id, token.and_then(subject).as_deref()).await {
+        Ok(true) => {}
+        Ok(false) => return not_yours(),
+        Err(error) => return internal_error(error),
+    }
     // One turn per session at a time, also across replicas: two turns would
     // edit the same plan and files, and the second history save would be refused.
     let lock = match state.store.lock(&session_id).await {
@@ -196,15 +268,13 @@ async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatReques
         }
         Err(error) => return internal_error(error),
     };
-    if let Err(error) = state.store.touch(&session_id).await {
-        return internal_error(error);
-    }
     let workspace = match state.store.load_workspace(&session_id).await {
         Ok(workspace) => SharedWorkspace::new(workspace),
         Err(error) => return internal_error(error),
     };
     let (sender, mut subagent_events) = mpsc::unbounded_channel();
-    let agent = state.agent(&workspace, sender);
+    let mcp = state.mcp_tools_for(token).await;
+    let agent = state.agent(&workspace, sender, mcp);
 
     let events = async_stream::stream! {
         let _lock = lock;
@@ -285,11 +355,17 @@ async fn chat(State(state): State<Arc<AppState>>, Json(request): Json<ChatReques
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
-async fn reset(State(state): State<Arc<AppState>>, Json(request): Json<SessionRequest>) -> Response {
-    match state.store.reset(&request.session_id).await {
-        Ok(()) => Json(json!({ "ok": true })).into_response(),
+async fn reset(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(request): Json<SessionRequest>) -> Response {
+    let owner = bearer(&headers).and_then(subject);
+    match state.store.reset(&request.session_id, owner.as_deref()).await {
+        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(false) => not_yours(),
         Err(error) => internal_error(error),
     }
+}
+
+fn not_yours() -> Response {
+    (StatusCode::FORBIDDEN, Json(json!({ "error": "This chat belongs to someone else." }))).into_response()
 }
 
 /// Ready once the agent is loaded (before the server starts) and while the
@@ -311,7 +387,7 @@ async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "description": bundle.config.description,
         "examples": bundle.config.examples,
         "model": bundle.config.model,
-        "mcp_tools": state.mcp_tools.iter().map(|tool| tool.name().to_string()).collect::<Vec<_>>(),
+        "mcp_tools": *state.mcp_tool_names.read().unwrap_or_else(std::sync::PoisonError::into_inner),
         "documents": documents,
         "skills": state.skills.iter().flat_map(|skills| skills.iter().map(|skill| &skill.name)).collect::<Vec<_>>(),
         "subagents": state.subagents.iter().map(|agent| &agent.name).collect::<Vec<_>>(),
@@ -461,8 +537,11 @@ async fn start(mut bundle: Bundle) -> anyhow::Result<AppState> {
         }
     }
 
-    let mcp_tools: Vec<DynamicTool> =
+    // Without a user: a server that requires one (a gateway checking tokens)
+    // gives no tools here, and its tools come with each signed-in user's turn.
+    let shared_mcp_tools: Vec<DynamicTool> =
         futures::future::join_all(bundle.config.mcp_servers.iter().map(mcp_tools)).await.into_iter().flatten().collect();
+    let mcp_tool_names = shared_mcp_tools.iter().map(|tool| tool.name().to_string()).collect();
 
     let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     let store = Store::open(env("DATABASE_URL"), env("DATABASE_SCHEMA")).await?;
@@ -480,7 +559,8 @@ async fn start(mut bundle: Bundle) -> anyhow::Result<AppState> {
         knowledge,
         skills,
         subagents: Arc::new(subagents),
-        mcp_tools,
+        shared_mcp_tools,
+        mcp_tool_names: std::sync::RwLock::new(mcp_tool_names),
         store,
     })
 }
@@ -522,4 +602,22 @@ async fn shutdown_signal(mut terminate: Signal) {
         _ = terminate.recv() => {}
     }
     tracing::info!("shutting down; waiting for running requests to finish");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    #[test]
+    fn reads_the_bearer_token_and_its_subject() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(bearer(&headers), None);
+        // {"alg":"none"} . {"sub":"alice-id","groups":["sales"]} . (no signature)
+        let token = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJhbGljZS1pZCIsImdyb3VwcyI6WyJzYWxlcyJdfQ.";
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {token}")).unwrap());
+        assert_eq!(bearer(&headers), Some(token));
+        assert_eq!(subject(token).as_deref(), Some("alice-id"));
+        assert_eq!(subject("garbage"), None);
+    }
 }

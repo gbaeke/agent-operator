@@ -40,7 +40,7 @@ Steps, each one demoable:
 1. Keycloak on kind: namespace, Postgres, realm, CoreDNS rewrite (`deploy/auth.sh`). **Done.**
 2. oauth2-proxy sidecar and JWT check in the console; the UI shows who is signed in and has sign-out. **Done:** `deploy/auth.sh` patches the console (`deploy/auth/console-patch.yaml`) and `delete` takes it off again.
 3. `spec.access` in the CRD, operator and Studio; console filtering. **Done.**
-4. Runtime: token on per-turn MCP connections, session owners.
+4. Runtime: token on per-turn MCP connections, session owners. **Done:** the console sends `Authorization: Bearer`; with it the runtime connects its MCP servers per turn as the user, and sessions (`agent_workspaces.owner`) refuse other users with 403. The runtime reads `sub` without checking the token (only the console can reach it); step 7 checks it.
 5. Gateway JWT policy on `/mcp`, MCP server JWT check, `whoami` and `my_tickets`.
 6. MCP tool authorization per group in the gateway.
 7. Later: token exchange at the gateway (`backend.auth.oauthTokenExchange`, audience `mcp-server`) instead of passthrough, and agents validating the token themselves.

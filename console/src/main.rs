@@ -146,6 +146,10 @@ async fn forward(
         return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no agent `{id}`") }))).into_response();
     };
     let mut request = state.http.request(method, format!("{}/v1/{operation}", agent.url));
+    // The agent connects to its MCP tools as this user, and keeps the chat as theirs.
+    if let Some(user) = &user {
+        request = request.bearer_auth(&user.token);
+    }
     if !body.is_empty() {
         request = request.header(header::CONTENT_TYPE, "application/json").body(body);
     }

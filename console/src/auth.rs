@@ -57,7 +57,6 @@ pub struct User {
     pub groups: Vec<String>,
     /// The access token itself, to pass on. Never serialized or logged.
     #[serde(skip)]
-    #[allow(dead_code)]
     pub token: String,
 }
 

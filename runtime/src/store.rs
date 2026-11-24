@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS agent_workspaces (
     workspace JSONB NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- The user (token `sub`) a session belongs to; NULL without sign-in.
+ALTER TABLE agent_workspaces ADD COLUMN IF NOT EXISTS owner TEXT;
 ";
 
 /// The conversation store rig's agent loads before a turn and saves after it.
@@ -55,8 +57,15 @@ enum Backend {
     },
     Memory {
         workspaces: Mutex<HashMap<String, Workspace>>,
+        owners: Mutex<HashMap<String, Option<String>>>,
         busy: Arc<Mutex<HashSet<String>>>,
     },
+}
+
+/// Whether a user may use a session that has this owner. A session without
+/// an owner (made without sign-in) becomes the first signed-in user's.
+fn may_use(owner: Option<&str>, user: Option<&str>) -> bool {
+    owner.is_none() || owner == user
 }
 
 /// Held for the length of one turn; dropping it lets the session's next turn start.
@@ -80,7 +89,7 @@ impl Store {
         let Some(url) = database_url else {
             return Ok(Self {
                 history: History::Memory(MemoryStore::default()),
-                backend: Backend::Memory { workspaces: Mutex::default(), busy: Arc::default() },
+                backend: Backend::Memory { workspaces: Mutex::default(), owners: Mutex::default(), busy: Arc::default() },
             });
         };
         let mut options = PgConnectOptions::from_str(&url)?;
@@ -136,19 +145,37 @@ impl Store {
         }
     }
 
-    /// Marks the session as used now, so it expires counting from its last turn.
-    pub async fn touch(&self, session: &str) -> anyhow::Result<()> {
-        if let Backend::Postgres { pool, .. } = &self.backend {
-            sqlx::query(
-                "INSERT INTO agent_workspaces (session_id, workspace) VALUES ($1, $2)
-                 ON CONFLICT (session_id) DO UPDATE SET updated_at = now()",
-            )
-            .bind(session)
-            .bind(sqlx::types::Json(Workspace::default()))
-            .execute(pool)
-            .await?;
+    /// Marks the session as used now by `user`, so it expires counting from
+    /// its last turn. A new session becomes the user's; `false` when it is
+    /// someone else's (then nothing changes).
+    pub async fn touch(&self, session: &str, user: Option<&str>) -> anyhow::Result<bool> {
+        match &self.backend {
+            Backend::Postgres { pool, .. } => {
+                let done = sqlx::query(
+                    "INSERT INTO agent_workspaces (session_id, workspace, owner) VALUES ($1, $2, $3)
+                     ON CONFLICT (session_id) DO UPDATE
+                       SET updated_at = now(), owner = COALESCE(agent_workspaces.owner, EXCLUDED.owner)
+                       WHERE agent_workspaces.owner IS NULL OR agent_workspaces.owner = EXCLUDED.owner",
+                )
+                .bind(session)
+                .bind(sqlx::types::Json(Workspace::default()))
+                .bind(user)
+                .execute(pool)
+                .await?;
+                Ok(done.rows_affected() == 1)
+            }
+            Backend::Memory { owners, .. } => {
+                let mut owners = owners.lock().unwrap_or_else(PoisonError::into_inner);
+                let owner = owners.entry(session.to_owned()).or_insert_with(|| user.map(str::to_owned));
+                if !may_use(owner.as_deref(), user) {
+                    return Ok(false);
+                }
+                if owner.is_none() {
+                    *owner = user.map(str::to_owned);
+                }
+                Ok(true)
+            }
         }
-        Ok(())
     }
 
     /// Deletes the sessions idle for longer than `idle`, with their history,
@@ -223,13 +250,23 @@ impl Store {
         Ok(())
     }
 
-    /// Forgets the session's history and workspace.
-    pub async fn reset(&self, session: &str) -> anyhow::Result<()> {
+    /// Forgets the session's history and workspace; `false` when it is someone else's.
+    pub async fn reset(&self, session: &str, user: Option<&str>) -> anyhow::Result<bool> {
         match &self.backend {
             Backend::Postgres { pool, .. } => {
                 // rig's store has no delete, so its rows go directly: a
                 // conversation is the log named after the session.
                 let mut tx = pool.begin().await?;
+                let owner: Option<(Option<String>,)> =
+                    sqlx::query_as("SELECT owner FROM agent_workspaces WHERE session_id = $1 FOR UPDATE")
+                        .bind(session)
+                        .fetch_optional(&mut *tx)
+                        .await?;
+                if let Some((owner,)) = owner
+                    && !may_use(owner.as_deref(), user)
+                {
+                    return Ok(false);
+                }
                 for statement in [
                     "DELETE FROM rig_memory_log_chunks WHERE name = $1",
                     "DELETE FROM rig_memory_logs WHERE name = $1",
@@ -239,13 +276,20 @@ impl Store {
                 }
                 tx.commit().await?;
             }
-            Backend::Memory { workspaces, .. } => {
+            Backend::Memory { workspaces, owners, .. } => {
+                let mut owners = owners.lock().unwrap_or_else(PoisonError::into_inner);
+                if let Some(owner) = owners.get(session)
+                    && !may_use(owner.as_deref(), user)
+                {
+                    return Ok(false);
+                }
+                owners.remove(session);
                 // MemoryStore cannot delete one log either; the UI starts a new
                 // session id after a reset, so the old history is just unused.
                 workspaces.lock().unwrap_or_else(PoisonError::into_inner).remove(session);
             }
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Whether the database answers; always true in memory.
@@ -254,5 +298,32 @@ impl Store {
             Backend::Postgres { pool, .. } => sqlx::query("SELECT 1").execute(pool).await.is_ok(),
             Backend::Memory { .. } => true,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_session_belongs_to_its_first_user() {
+        let store = Store::open(None, None).await.unwrap();
+        assert!(store.touch("s1", Some("alice")).await.unwrap());
+        assert!(store.touch("s1", Some("alice")).await.unwrap());
+        assert!(!store.touch("s1", Some("bob")).await.unwrap());
+        assert!(!store.touch("s1", None).await.unwrap());
+        assert!(!store.reset("s1", Some("bob")).await.unwrap());
+        assert!(store.reset("s1", Some("alice")).await.unwrap());
+        // Gone after the reset, so the id is free again.
+        assert!(store.touch("s1", Some("bob")).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn sessions_without_sign_in_stay_open_until_claimed() {
+        let store = Store::open(None, None).await.unwrap();
+        assert!(store.touch("s2", None).await.unwrap());
+        assert!(store.touch("s2", None).await.unwrap());
+        assert!(store.touch("s2", Some("alice")).await.unwrap());
+        assert!(!store.touch("s2", None).await.unwrap());
     }
 }
