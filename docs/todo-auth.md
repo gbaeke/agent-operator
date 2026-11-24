@@ -22,46 +22,22 @@ oauth2-proxy ─► console ── Bearer <user token> ──► agent ──►
 
 ## Next
 
-### 6. Tool rules per group (small, config only)
+Tracked as GitHub issues:
 
-The gateway decides which tools a group may use: for example `fetch_url` only for `engineering`. Other users don't see the tool in `tools/list`, and a direct `tools/call` is refused.
+- [#11](https://github.com/gbaeke/agent-operator/issues/11) Tool rules per group on the gateway (small, config only)
+- [#12](https://github.com/gbaeke/agent-operator/issues/12) Agents check the user's token themselves
+- [#13](https://github.com/gbaeke/agent-operator/issues/13) Token exchange instead of passing the user's token on (also fixes long turns)
+- [#14](https://github.com/gbaeke/agent-operator/issues/14) Test a real rollback with `deploy/auth.sh delete`
+- [#15](https://github.com/gbaeke/agent-operator/issues/15) Let `deploy.sh` install sign-in too
+- [#16](https://github.com/gbaeke/agent-operator/issues/16) HTTPS for the console and Keycloak
+- [#17](https://github.com/gbaeke/agent-operator/issues/17) An agent lists no MCP tools until a signed-in user has chatted with it
 
-- Add `backend.mcp.authorization` to an `AgentgatewayPolicy` for the `mcp-server` backend: CEL rules on `jwt.groups` and the tool name (`Allow`/`Require`; avoid `Deny`, which fails open on expression errors).
-- Put it in `deploy/auth/gateway-policy.yaml`, so `deploy/auth.sh delete` removes it too.
-- Demo: alice asks quokka to fetch a web page; the tool is not there for her, but it is for bob.
-
-### 7a. Agents check the token themselves (small to medium)
-
-Today the runtime reads the user (`sub`) from the token without checking it, and relies on the network policy that only lets the console in. Any pod that gets past that policy could pretend to be any user.
-
-- Check the signature, issuer, audience and expiry in the runtime, as the console and the MCP server do (`OIDC_ISSUER`, switched on by `deploy/auth.sh` through a patch or the operator).
-- Optionally the operator passes `spec.access` to the agent, so the agent enforces it too, not only the console.
-- Consider one shared crate for the token check: the console and the MCP server now each have a copy.
-
-### 7b. Token exchange instead of passing the token on (medium)
-
-One token (`aud: agent-platform`) now travels all the way to the MCP server. The MCP spec says a server should only accept tokens issued for it.
-
-- The gateway exchanges the user's token for one with `aud: mcp-server` (`backend.auth.oauthTokenExchange`), using Keycloak's standard token exchange.
-- Keycloak: a client `mcp-server` (the audience) and token-exchange permission for the client the gateway uses.
-- The MCP server then expects audience `mcp-server`.
-- This also helps with long turns (see below): the gateway can get a fresh token per call.
-
-## Loose ends
-
-- **Merge:** the work is on branch `auth-keycloak`, not pushed. Merge to `main` when it is accepted.
-- **A real rollback:** `deploy/auth.sh delete` has been run for Keycloak (step 1), but its undo of the console, MCP server and gateway changes (steps 2 to 5) has only been checked as a server-side dry run. Run `delete` and `apply` for real once.
-- **`deploy.sh` doesn't know about sign-in:** after recreating the cluster, run `deploy/auth.sh` after `deploy/deploy.sh`. Add an `AUTH=1` option, or a line in the quick start.
-- **HTTPS:** everything is plain HTTP on the tailnet, so cookies are not `Secure` and Keycloak warns. `tailscale serve` can give real `*.ts.net` certificates.
+Recommended order: #11 (quick, and a good demo), then #14; #12 and #13 after that, or not at all for a demo.
 
 ## Known limits
 
-- **Long turns can outlive the token:** the token is sent when a turn starts and access tokens last 30 minutes. Token exchange (7b) or refreshing in the runtime fixes it properly.
-- **No MCP tools before the first chat:** behind sign-in an agent cannot list its MCP tools at startup, so `/v1/info` shows none until a signed-in user has chatted with it.
+- **Long turns can outlive the token:** the token is sent when a turn starts and access tokens last 30 minutes ([#13](https://github.com/gbaeke/agent-operator/issues/13)).
+- **No MCP tools before the first chat:** behind sign-in an agent cannot list its MCP tools at startup, so `/v1/info` shows none until a signed-in user has chatted with it ([#17](https://github.com/gbaeke/agent-operator/issues/17)).
 - **The box's name means Keycloak inside the cluster:** the CoreDNS rewrite sends `AUTH_HOST` to Keycloak, so nothing in the cluster can use that name for anything else.
 - **The `access` lists are only on the live cluster:** samples are generated from the agent folders and `access` is a Kubernetes-only field; set it with `kubectl patch` or Agent Studio.
 - **Keep tokens out of logs, session storage and the Agent's status:** true today; keep it that way.
-
-## Recommended order
-
-Step 6 next (quick, and a good demo), then a real rollback test and the merge to `main`; 7a and 7b after that, or not at all for a demo.

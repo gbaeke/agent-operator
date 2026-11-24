@@ -76,7 +76,7 @@ cargo run -q -p agent-operator -- render agents/my-agent | kubectl apply -f -
 - [agent.yaml](#agentyaml): every field, tool groups, skills
 - [Agent API (v1)](#agent-api-v1) and the [console](#console)
 - [Kubernetes](#kubernetes): the `Agent` resource, models, MCP servers, sessions, `render`, Agent Studio, the operator, [sign-in](#sign-in-and-who-sees-which-agent-optional)
-- [Code map](#code-map), [known issues](#known-issues), and open items in [docs/todo.md](docs/todo.md)
+- [Code map](#code-map), [known issues](#known-issues), and open items in [GitHub issues](https://github.com/gbaeke/agent-operator/issues)
 - [docs/agent-specs.md](docs/agent-specs.md): existing agent specs (Open Agent Spec, A2A Agent Card, OASF, Agent Skills) and how this project compares with kagent
 
 ## Without Kubernetes
@@ -457,7 +457,7 @@ spec:
 
 Others don't see the agent in the console, and calls to it answer 404. Changing `access` does not restart the agent. Agent Studio has the same two fields.
 
-The user's identity also reaches the tools. The console passes the user's token to the agent, the agent connects to its MCP servers with it for each turn, agentgateway lets only requests with a valid token through on `/mcp` (and removes it on `/learn/mcp`, before it leaves the cluster), and the MCP server checks it once more. Tools then know the caller: `whoami` returns them and `my_tickets` returns their own (made-up) tickets. Try the `helpdesk` sample: alice and bob asking "What are my open tickets?" get different answers. Chats belong to the user who started them. What is still open is in [docs/todo.md](docs/todo.md).
+The user's identity also reaches the tools. The console passes the user's token to the agent, the agent connects to its MCP servers with it for each turn, agentgateway lets only requests with a valid token through on `/mcp` (and removes it on `/learn/mcp`, before it leaves the cluster), and the MCP server checks it once more. Tools then know the caller: `whoami` returns them and `my_tickets` returns their own (made-up) tickets. Try the `helpdesk` sample: alice and bob asking "What are my open tickets?" get different answers. Chats belong to the user who started them. What is still open is in [docs/todo-auth.md](docs/todo-auth.md) and the [`auth` issues](https://github.com/gbaeke/agent-operator/issues?q=is%3Aissue+is%3Aopen+label%3Aauth).
 
 ## Code map
 

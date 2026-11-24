@@ -135,4 +135,4 @@ running code an agent writes, which needs a real sandbox.
   - Built-in research tools: knowledge search, a plan, a scratch filesystem and subagents ship with the runtime.
   - It is small enough to read in an afternoon, which helps for learning and writing about it.
 - **A middle path:** run our runtime as a kagent BYO agent. kagent then handles models, MCP and its UI, and we
-  keep the runtime. That needs A2A on port 8080 in the runtime (see [todo.md](todo.md)).
+  keep the runtime. That needs A2A on port 8080 in the runtime ([#3](https://github.com/gbaeke/agent-operator/issues/3)).
