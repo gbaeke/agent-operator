@@ -83,9 +83,13 @@ impl Bundle {
         Ok(Self { dir, name, config, instructions, skills, knowledge })
     }
 
-    /// Whether a built-in tool group is on. Knowledge and skills also need content.
+    /// Whether a built-in tool group is on. Knowledge and skills also need
+    /// content. The shell is never on by default: it must be listed.
     pub fn enabled(&self, builtin: Builtin) -> bool {
-        let listed = self.config.tools.as_ref().is_none_or(|tools| tools.contains(&builtin));
+        let listed = match &self.config.tools {
+            Some(tools) => tools.contains(&builtin),
+            None => builtin != Builtin::Shell,
+        };
         listed
             && match builtin {
                 Builtin::Knowledge => self.knowledge.is_some(),
@@ -178,6 +182,17 @@ mod tests {
         assert!(bundle.enabled(Builtin::Planning));
         assert!(!bundle.enabled(Builtin::Knowledge));
         assert!(!bundle.enabled(Builtin::Skills));
+        assert!(!bundle.enabled(Builtin::Shell), "the shell must be listed to be on");
+    }
+
+    #[test]
+    fn shell_is_on_when_listed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("agent.yaml"), "tools: [files, shell]\n").unwrap();
+        let bundle = Bundle::load(dir.path()).unwrap();
+        assert!(bundle.enabled(Builtin::Shell));
+        assert!(bundle.enabled(Builtin::Files));
+        assert!(!bundle.enabled(Builtin::Planning));
     }
 
     #[test]

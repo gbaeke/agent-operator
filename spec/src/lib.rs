@@ -41,8 +41,9 @@ pub struct AgentConfig {
     /// The system prompt. In an agent folder it may live in `instructions.md` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// The built-in tool groups to enable. Absent means all of them.
-    /// `knowledge` and `skills` only appear when there is content for them.
+    /// The built-in tool groups to enable. Absent means all of them except
+    /// `shell`, which is only on when listed. `knowledge` and `skills` only
+    /// appear when there is content for them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Builtin>>,
     /// MCP servers whose tools the agent and its subagents can use.
@@ -71,6 +72,9 @@ pub enum Builtin {
     Skills,
     /// `task`: hand a self-contained job to a subagent with its own context.
     Subagents,
+    /// `shell`: run commands with `sh` in a folder holding the session's files.
+    /// Needs an image with a shell, such as `agent-runtime-python`; only on when listed.
+    Shell,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]

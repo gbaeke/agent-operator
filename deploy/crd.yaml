@@ -321,8 +321,9 @@ spec:
                 type: number
               tools:
                 description: |-
-                  The built-in tool groups to enable. Absent means all of them.
-                  `knowledge` and `skills` only appear when there is content for them.
+                  The built-in tool groups to enable. Absent means all of them except
+                  `shell`, which is only on when listed. `knowledge` and `skills` only
+                  appear when there is content for them.
                 items:
                   description: A group of built-in tools.
                   enum:
@@ -331,6 +332,7 @@ spec:
                   - knowledge
                   - skills
                   - subagents
+                  - shell
                   type: string
                 nullable: true
                 type: array

@@ -121,7 +121,7 @@ maxTurns: 40                           # model calls per user message
 instructions: |                        # or put it in instructions.md
   You are a cheerful, practical trip planner...
 
-tools: [planning, files, knowledge, skills, subagents]   # built-in groups; absent = all
+tools: [planning, files, knowledge, skills, subagents]   # built-in groups; absent = all but shell
 
 mcpServers:
   - url: ${MCP_URL:-http://127.0.0.1:8081/mcp}
@@ -153,6 +153,17 @@ Unknown keys are an error, so a typo like `modle:` fails loudly.
 | `knowledge` | `search_knowledge_base`, `read_document`, `list_documents` | BM25 over `knowledge/*.md`, split per section. Only active when the folder has documents. |
 | `skills` | `load_skill` | Only active when `skills/` has skills. |
 | `subagents` | `task` | Hands a self-contained job to a subagent with a fresh context. Without `subagents:` in the YAML there is one `general-purpose` subagent. Subagents get the knowledge, skills and MCP tools, but no plan, files or subagents of their own. |
+| `shell` | `shell` | Runs `sh -c` commands (rig-tools' `Shell`) in a folder that holds the session's files; see [The shell](#the-shell). **Only on when listed**, and only in an image with a shell (`agent-runtime-python`). |
+
+### The shell
+
+`agents/analyst` lists `shell`: it writes a Python script with `write_file`, runs it with `shell`, and answers from the output.
+
+- **Files.** The session's files stay in the session store. Before each command they are written into `/tmp/agent-sessions/<hash>`; afterwards, text files the command made or changed come back into the session (and the UI's Files tab), and files it deleted leave it. Binary files and files over 200 KB stay on disk for the rest of the turn only. The folder is deleted when the turn ends, also when the client goes away mid-turn.
+- **Limits.** One command at a time per chat, stopped after `SHELL_TIMEOUT_SECS` (default 300); output past 2000 lines or 50 KB keeps its first and last lines and the errors between.
+- **Secrets.** Commands get a clean environment: `PATH`, the locale, and `HOME`/`TMPDIR` in the session folder; no API keys and no `DATABASE_URL`. The runtime makes itself non-dumpable, so its `/proc/<pid>/environ`, memory and open connections are unreadable to the commands, which run as the same user.
+- **Isolation.** Commands run in the agent's pod: read-only root, no capabilities, the pod's memory limit, and its network policy (only the gateway, Postgres and DNS). Chats of the same agent whose turns run on the same pod at the same moment can see each other's folders. An agent whose users must share nothing needs a sandbox per chat, which this is not.
+- **Images.** In the distroless `agent-runtime` there is no `sh`: an agent that lists `shell` logs a warning and runs without the tool. `agent --check` and `/v1/info` (`"shell"`) say whether it is on.
 
 ### Skills
 
@@ -168,7 +179,7 @@ description: Work out the SLA service credit a customer is owed after an outage.
 1. Find the outage in the postmortems...
 ```
 
-Only the name and description of each skill go into the system prompt. The agent calls `load_skill` when a request matches. The result lists the skill's other files, which it can read with `load_skill(name, file)`. Skills are read into memory at startup. Scripts can be read but not run, because the image has no shell. Hidden entries such as the `..data` folders of Kubernetes ConfigMap volumes are skipped.
+Only the name and description of each skill go into the system prompt. The agent calls `load_skill` when a request matches. The result lists the skill's other files, which it can read with `load_skill(name, file)`. Skills are read into memory at startup. Scripts can be read; to run them, the agent needs the `shell` tool. Hidden entries such as the `..data` folders of Kubernetes ConfigMap volumes are skipped.
 
 ## Containers
 
@@ -211,6 +222,8 @@ These are deployment settings, not part of what makes an agent unique, so they s
 | `DATABASE_URL` | unset: sessions in memory |
 | `DATABASE_SCHEMA` | unset: the database's default schema. Set, the tables live in this schema, made at startup |
 | `SESSION_TTL_DAYS` | `7`; `0` keeps sessions forever |
+| `SHELL_DIR` | `$TMPDIR/agent-sessions`: where the `shell` tool's session folders go |
+| `SHELL_TIMEOUT_SECS` | `300`: the most a `shell` command may run |
 | `RUST_LOG` | `info` |
 
 `.env` in the working directory (or a parent directory) is read at startup. Variables that are already set win.

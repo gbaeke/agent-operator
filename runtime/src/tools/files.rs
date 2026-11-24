@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 use super::{SharedWorkspace, ToolError, schema};
 
-const MAX_FILE_BYTES: usize = 200_000;
+pub(super) const MAX_FILE_BYTES: usize = 200_000;
 
 fn normalize(path: &str) -> Result<String, ToolError> {
     let path = path.trim().trim_start_matches("./").trim_start_matches('/');

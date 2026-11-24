@@ -17,7 +17,9 @@ axum = "0.8.9"
 bm25 = "2.3"
 dotenvy = "0.15.7"
 futures = "0.3.34"
+libc = "0.2"
 rig = { version = "0.46", features = ["rmcp", "memory", "postgres"] }
+rig-tools = "0.46"
 rmcp = { version = "3.8", features = ["client", "transport-streamable-http-client-reqwest"] }
 schemars = "1"
 serde = { version = "1.0.229", features = ["derive"] }

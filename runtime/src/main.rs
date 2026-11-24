@@ -70,13 +70,15 @@ struct AppState {
     shared_mcp_tools: Vec<DynamicTool>,
     /// The MCP tool names last seen, for `/v1/info`.
     mcp_tool_names: std::sync::RwLock<Vec<String>>,
+    /// Set when the agent lists `shell` and the image has `sh`.
+    shell: Option<Arc<ShellSettings>>,
     store: Store,
 }
 
 impl AppState {
     /// The main agent for one run, its tools bound to the session's workspace
     /// and its MCP tools connected for this run's user.
-    fn agent(&self, workspace: &SharedWorkspace, events: EventSender, mcp: Vec<DynamicTool>) -> Agent {
+    fn agent(&self, session: &str, workspace: &SharedWorkspace, events: EventSender, mcp: Vec<DynamicTool>) -> Agent {
         let bundle = &self.bundle;
         let mut builder = AgentBuilder::new(self.model.clone())
             .preamble(&self.system_prompt)
@@ -93,6 +95,14 @@ impl AppState {
                 .tool(ReadFile { workspace: workspace.clone() })
                 .tool(WriteFile { workspace: workspace.clone() })
                 .tool(EditFile { workspace: workspace.clone() });
+        }
+        if let Some(settings) = &self.shell {
+            builder = builder.tool(RunShell {
+                workspace: workspace.clone(),
+                dir: settings.session_dir(session),
+                settings: settings.clone(),
+                busy: Default::default(),
+            });
         }
         if let Some(kb) = &self.knowledge {
             builder = builder
@@ -280,10 +290,13 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(reque
     };
     let (sender, mut subagent_events) = mpsc::unbounded_channel();
     let mcp = state.mcp_tools_for(token).await;
-    let agent = state.agent(&workspace, sender, mcp);
+    let agent = state.agent(&session_id, &workspace, sender, mcp);
 
+    // Dropped with the stream, however the turn ends, also when the client goes away.
+    let folder = state.shell.clone().map(|shell| SessionFolder { shell, session: session_id.clone() });
     let events = async_stream::stream! {
         let _lock = lock;
+        let _folder = folder;
         yield UiEvent::Workspace(workspace.snapshot());
         let runner = agent
             .prompt(request.message.clone())
@@ -361,10 +374,28 @@ async fn chat(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(reque
     Sse::new(events).keep_alive(KeepAlive::default()).into_response()
 }
 
+/// Deletes a session's shell folder when the turn ends. The session's files
+/// are in the store; left on disk, other chats' commands could read them.
+struct SessionFolder {
+    shell: Arc<ShellSettings>,
+    session: String,
+}
+
+impl Drop for SessionFolder {
+    fn drop(&mut self) {
+        self.shell.remove_session(&self.session);
+    }
+}
+
 async fn reset(State(state): State<Arc<AppState>>, headers: HeaderMap, Json(request): Json<SessionRequest>) -> Response {
     let owner = bearer(&headers).and_then(subject);
     match state.store.reset(&request.session_id, owner.as_deref()).await {
-        Ok(true) => Json(json!({ "ok": true })).into_response(),
+        Ok(true) => {
+            if let Some(shell) = &state.shell {
+                shell.remove_session(&request.session_id);
+            }
+            Json(json!({ "ok": true })).into_response()
+        }
         Ok(false) => not_yours(),
         Err(error) => internal_error(error),
     }
@@ -397,6 +428,7 @@ async fn info(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "documents": documents,
         "skills": state.skills.iter().flat_map(|skills| skills.iter().map(|skill| &skill.name)).collect::<Vec<_>>(),
         "subagents": state.subagents.iter().map(|agent| &agent.name).collect::<Vec<_>>(),
+        "shell": state.shell.is_some(),
         "store": state.store.kind(),
         "pod": std::env::var("POD_NAME").ok(),
     }))
@@ -488,6 +520,14 @@ async fn main() -> anyhow::Result<()> {
                     Ok(gone) => tracing::info!("deleted {gone} conversations idle for over {ttl_days} days"),
                     Err(error) => tracing::warn!("session expiry failed: {error:#}"),
                 }
+                // Folders a turn left behind when the pod's process died mid-turn.
+                if let Some(shell) = state.shell.clone() {
+                    let hour = std::time::Duration::from_secs(3_600);
+                    match tokio::task::spawn_blocking(move || shell.expire(hour)).await {
+                        Ok(0) | Err(_) => {}
+                        Ok(gone) => tracing::info!("deleted {gone} shell folders left by unfinished turns"),
+                    }
+                }
             }
         });
     }
@@ -558,6 +598,21 @@ async fn start(mut bundle: Bundle) -> anyhow::Result<AppState> {
         false => None,
     };
     let skills = bundle.enabled(Builtin::Skills).then(|| Arc::new(bundle.skills.clone()));
+    let shell = match bundle.enabled(Builtin::Shell) {
+        false => None,
+        true => match ShellSettings::from_env() {
+            Some(settings) => {
+                // Before any command can run: the runtime's secrets stay out of their reach.
+                protect_runtime().context("could not hide the runtime from shell commands")?;
+                tracing::info!("shell: commands run in {}, at most {}s each", settings.root.display(), settings.timeout_secs);
+                Some(Arc::new(settings))
+            }
+            None => {
+                tracing::warn!("shell is listed in tools, but this image has no `sh`; the agent runs without it");
+                None
+            }
+        },
+    };
     Ok(AppState {
         system_prompt: bundle.system_prompt(),
         bundle,
@@ -567,6 +622,7 @@ async fn start(mut bundle: Bundle) -> anyhow::Result<AppState> {
         subagents: Arc::new(subagents),
         shared_mcp_tools,
         mcp_tool_names: std::sync::RwLock::new(mcp_tool_names),
+        shell,
         store,
     })
 }
@@ -578,12 +634,17 @@ fn print_check(bundle: &Bundle) {
     println!("model      {}{}", config.model, config.base_url.as_deref().map(|url| format!(" via {url}")).unwrap_or_default());
     println!("prompt     {} characters", bundle.system_prompt().len());
     println!(
-        "tools      planning {} · files {} · knowledge {} · skills {} · subagents {}",
+        "tools      planning {} · files {} · knowledge {} · skills {} · subagents {} · shell {}",
         on(Builtin::Planning),
         on(Builtin::Files),
         on(Builtin::Knowledge),
         on(Builtin::Skills),
-        on(Builtin::Subagents)
+        on(Builtin::Subagents),
+        match (bundle.enabled(Builtin::Shell), ShellSettings::from_env().is_some()) {
+            (false, _) => "off",
+            (true, true) => "on",
+            (true, false) => "listed, but no `sh` here",
+        }
     );
     if let Some(kb) = &bundle.knowledge {
         println!("knowledge  {}", kb.summary());

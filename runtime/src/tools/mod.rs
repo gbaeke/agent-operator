@@ -4,6 +4,7 @@
 mod files;
 mod knowledge;
 mod planning;
+mod shell;
 mod skill;
 mod task;
 
@@ -15,6 +16,7 @@ use serde::{Deserialize, Serialize};
 pub use files::{EditFile, ListFiles, ReadFile, WriteFile};
 pub use knowledge::{ListDocuments, ReadDocument, SearchKnowledgeBase};
 pub use planning::{PlanGuard, Todo, WriteTodos};
+pub use shell::{RunShell, ShellSettings, protect_runtime};
 pub use skill::LoadSkill;
 pub use task::{GENERAL_PURPOSE, Subagent, SubagentTools, Task};
 

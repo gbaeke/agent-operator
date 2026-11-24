@@ -5,8 +5,8 @@
 //! calls `load_skill` to read a skill's instructions when a request matches,
 //! and to read its other files, so many skills cost few tokens.
 //!
-//! Skills are read into memory at startup. The agent cannot run a skill's
-//! scripts: the image has no shell. Scripts are readable like other files.
+//! Skills are read into memory at startup. Scripts are readable like other
+//! files; running them takes the `shell` tool, which works on the session's files.
 
 use std::collections::BTreeMap;
 use std::path::Path;
