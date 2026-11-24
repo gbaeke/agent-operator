@@ -1,0 +1,198 @@
+# Keycloak, the identity provider for the console, the agents and the MCP
+# tools, in its own namespace `auth` with its own Postgres. Nothing in the
+# `agents` namespace depends on it yet; `deploy/auth.sh delete` removes it all.
+#
+# One issuer URL everywhere: http://<host>:32001, where <host> is the name the
+# browser uses for this machine (its tailnet name, or keycloak.localtest.me,
+# which resolves to 127.0.0.1). Inside the cluster a CoreDNS rewrite (made by
+# deploy/auth.sh) sends the same name to the Service below, which listens on
+# 32001 too.
+#
+# deploy/auth.sh makes the ConfigMap keycloak-host (key `host`) and the
+# Secrets once: keycloak-db (Postgres password),
+# keycloak-admin (master realm admin) and keycloak-realm (the demo users'
+# password and the console's client secret, filled into realm.json at import).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: auth
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: auth
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: postgres }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 70
+        runAsGroup: 70
+        fsGroup: 70
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: POSTGRES_USER, value: keycloak }
+            - { name: POSTGRES_DB, value: keycloak }
+            - name: POSTGRES_PASSWORD
+              valueFrom: { secretKeyRef: { name: keycloak-db, key: password } }
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports: [{ name: postgres, containerPort: 5432 }]
+          readinessProbe:
+            exec: { command: ["pg_isready", "-U", "keycloak", "-d", "keycloak", "-h", "127.0.0.1"] }
+            periodSeconds: 5
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: run, mountPath: /var/run/postgresql }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - { name: run, emptyDir: {} }
+        - { name: tmp, emptyDir: {} }
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: { storage: 1Gi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: auth
+spec:
+  selector: { app.kubernetes.io/name: postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: keycloak
+  namespace: auth
+  labels: { app.kubernetes.io/name: keycloak }
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app.kubernetes.io/name: keycloak }
+  template:
+    metadata:
+      labels: { app.kubernetes.io/name: keycloak }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 0
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: keycloak
+          image: quay.io/keycloak/keycloak:26.4.7
+          imagePullPolicy: IfNotPresent
+          # The realm is imported only when it does not exist yet; later edits
+          # in the admin UI are kept (in Postgres) across restarts.
+          args: ["start", "--import-realm"]
+          env:
+            - name: AUTH_HOST
+              valueFrom: { configMapKeyRef: { name: keycloak-host, key: host } }
+            - { name: KC_HOSTNAME, value: "http://$(AUTH_HOST):32001" }
+            - { name: KC_HTTP_ENABLED, value: "true" }
+            - { name: KC_HEALTH_ENABLED, value: "true" }
+            - { name: KC_DB, value: postgres }
+            - { name: KC_DB_URL, value: "jdbc:postgresql://postgres.auth:5432/keycloak" }
+            - { name: KC_DB_USERNAME, value: keycloak }
+            - name: KC_DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: keycloak-db, key: password } }
+            # The first start runs a build JVM before the server: keep the heap well under the limit.
+            - { name: JAVA_OPTS_KC_HEAP, value: "-XX:MaxRAMPercentage=40 -XX:InitialRAMPercentage=10" }
+            - { name: KC_BOOTSTRAP_ADMIN_USERNAME, value: kcadmin }
+            - name: KC_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom: { secretKeyRef: { name: keycloak-admin, key: password } }
+            # Placeholders in realm.json, with AUTH_HOST.
+            - name: DEMO_PASSWORD
+              valueFrom: { secretKeyRef: { name: keycloak-realm, key: demo-password } }
+            - name: CONSOLE_CLIENT_SECRET
+              valueFrom: { secretKeyRef: { name: keycloak-realm, key: console-client-secret } }
+          ports:
+            - { name: http, containerPort: 8080 }
+            - { name: management, containerPort: 9000 }
+          # The first start builds Keycloak for Postgres and creates its schema.
+          startupProbe: { httpGet: { path: /health/started, port: management }, periodSeconds: 5, failureThreshold: 60 }
+          readinessProbe: { httpGet: { path: /health/ready, port: management }, periodSeconds: 10 }
+          livenessProbe: { httpGet: { path: /health/live, port: management }, periodSeconds: 20 }
+          resources:
+            requests: { cpu: 200m, memory: 768Mi }
+            limits: { memory: 2Gi }
+          securityContext:
+            allowPrivilegeEscalation: false
+            # Keycloak writes its build into /opt/keycloak at startup.
+            readOnlyRootFilesystem: false
+            capabilities: { drop: [ALL] }
+          volumeMounts:
+            - { name: realm, mountPath: /opt/keycloak/data/import, readOnly: true }
+      volumes:
+        - name: realm
+          configMap: { name: keycloak-realm }
+---
+# Port 32001 inside the cluster as well, so the issuer URL works from pods
+# (through the CoreDNS rewrite) exactly as it does from the browser.
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloak
+  namespace: auth
+spec:
+  type: NodePort
+  selector: { app.kubernetes.io/name: keycloak }
+  ports:
+    - { name: http, port: 32001, targetPort: http, nodePort: 32001 }
+---
+# Keycloak is open to everyone (browser, console, gateway, MCP server);
+# its Postgres only to Keycloak.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: keycloak-ingress
+  namespace: auth
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: keycloak }
+  policyTypes: [Ingress]
+  ingress:
+    - ports: [{ port: 8080 }, { port: 9000 }]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: auth
+spec:
+  podSelector:
+    matchLabels: { app.kubernetes.io/name: postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app.kubernetes.io/name: keycloak }
+      ports: [{ port: 5432 }]

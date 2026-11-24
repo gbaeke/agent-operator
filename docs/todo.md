@@ -15,15 +15,37 @@ Skills are now ConfigMaps that one Agent references by name. `render` names them
 
 ### Sign-in, and the user's token passed on to agents and MCP servers
 
-The console is open to anyone who can reach port 32000, and agents and MCP servers act as nobody in particular. Users should sign in, and their identity should reach every tool call, so an MCP server can act as that user (their mail, their files, their tickets) and enforce their permissions.
+The console is open to anyone who can reach port 32000, and agents and MCP servers act as nobody in particular. Users should sign in, see only the agents they may use, and their identity should reach every MCP tool call, so a tool can act as that user.
 
-- **Sign in on the console:** OIDC, for example Entra ID, or WorkOS as in app-blueprint. The console is the only way into the agents, so it is the place for it.
-- **Pass the identity on:** the console sends the user's token, or a token derived from it, with every call to an agent (`/v1/chat`), instead of only a session id.
-- **From the agent to its tools:** the runtime passes that token to the gateway on every model and MCP call. The gateway checks it, and for MCP servers that need the user's own access it forwards the token or exchanges it for one meant for that server (on-behalf-of, token exchange). agentgateway has policies for this (JWT checks, `oauthTokenExchange`, passthrough).
-- **Agents themselves:** an agent should accept only calls from the console, with a valid user token, and not just rely on the network policy.
-- **Sessions per user:** with an identity, sessions belong to a user and can be listed and reopened (see "Reopen chats in the UI" below).
-- **Who sees which agent:** optionally per user or group, for example from an annotation on the Agent.
-- Keep tokens out of logs, session storage and the Agent's status.
+```
+browser ──login──► Keycloak (users, groups)
+   │ cookie
+oauth2-proxy ─► console ── Bearer <user token> ──► agent ──► agentgateway ──► mcp-server
+                checks JWT,                    token on      checks JWT,      checks JWT,
+                filters agents                 MCP calls     tool rules       tools read claims
+```
+
+Decided:
+
+- **Keycloak** in its own namespace `auth`, realm `agents` imported from git, with its own small Postgres so it survives restarts and removes cleanly. Users `alice` (sales), `bob` (engineering), `admin` (platform-admins).
+- **One issuer URL everywhere:** Keycloak's hostname is the name the browser uses for this machine, port 32001 (`AUTH_HOST`: the tailnet name, else `keycloak.localtest.me`, which is 127.0.0.1), and a CoreDNS rewrite sends the same name to the Keycloak Service inside the cluster, which also listens on 32001.
+- **oauth2-proxy as a sidecar** of the console handles login, refresh and logout, with the session in encrypted cookies so console replicas share nothing. The console still validates the JWT (issuer, audience `agent-platform`, expiry). Without OIDC settings the console runs open, as now.
+- **`spec.access` on the Agent:** `groups` and `users`; absent means every signed-in user. `platform-admins` sees everything. The console filters `/api/agents` and refuses `forward` for others. Agent Studio gets the field.
+- **Token on every MCP call:** the runtime opens an MCP connection per chat turn with the user's token (today one connection is made at startup and shared). Sessions store their owner (`sub`) and refuse other users.
+- **Gateway:** an `AgentgatewayPolicy` on `/mcp` with `jwtAuthentication` (Strict, `preserveToken`), and `backend.mcp.authorization` rules on `jwt.groups` per tool.
+- **MCP server:** validates the JWT again and exposes the claims to tools; new tools `whoami` and `my_tickets` (fake per-user data).
+
+Steps, each one demoable:
+
+1. Keycloak on kind: namespace, Postgres, realm, CoreDNS rewrite (`deploy/auth.sh`). **In progress.**
+2. oauth2-proxy sidecar and JWT check in the console; the UI shows who is signed in and has sign-out.
+3. `spec.access` in the CRD, operator and Studio; console filtering.
+4. Runtime: token on per-turn MCP connections, session owners.
+5. Gateway JWT policy on `/mcp`, MCP server JWT check, `whoami` and `my_tickets`.
+6. MCP tool authorization per group in the gateway.
+7. Later: token exchange at the gateway (`backend.auth.oauthTokenExchange`, audience `mcp-server`) instead of passthrough, and agents validating the token themselves.
+
+Watch out for: a token is sent when a turn starts, so a long turn can outlive it (access tokens last 30 minutes for now; token exchange or refresh fixes it properly). Keep tokens out of logs, session storage and the Agent's status.
 
 ### A2A support in the runtime
 
