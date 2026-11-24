@@ -39,7 +39,7 @@ Steps, each one demoable:
 
 1. Keycloak on kind: namespace, Postgres, realm, CoreDNS rewrite (`deploy/auth.sh`). **Done.**
 2. oauth2-proxy sidecar and JWT check in the console; the UI shows who is signed in and has sign-out. **Done:** `deploy/auth.sh` patches the console (`deploy/auth/console-patch.yaml`) and `delete` takes it off again.
-3. `spec.access` in the CRD, operator and Studio; console filtering.
+3. `spec.access` in the CRD, operator and Studio; console filtering. **Done.**
 4. Runtime: token on per-turn MCP connections, session owners.
 5. Gateway JWT policy on `/mcp`, MCP server JWT check, `whoami` and `my_tickets`.
 6. MCP tool authorization per group in the gateway.

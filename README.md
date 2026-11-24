@@ -75,7 +75,7 @@ cargo run -q -p agent-operator -- render agents/my-agent | kubectl apply -f -
 - [Without Kubernetes](#without-kubernetes): an agent as a folder, `cargo run`, Docker and compose
 - [agent.yaml](#agentyaml): every field, tool groups, skills
 - [Agent API (v1)](#agent-api-v1) and the [console](#console)
-- [Kubernetes](#kubernetes): the `Agent` resource, models, MCP servers, sessions, `render`, Agent Studio, the operator
+- [Kubernetes](#kubernetes): the `Agent` resource, models, MCP servers, sessions, `render`, Agent Studio, the operator, [sign-in](#sign-in-and-who-sees-which-agent-optional)
 - [Code map](#code-map), [known issues](#known-issues), and open items in [docs/todo.md](docs/todo.md)
 - [docs/agent-specs.md](docs/agent-specs.md): existing agent specs (Open Agent Spec, A2A Agent Card, OASF, Agent Skills) and how this project compares with kagent
 
@@ -420,6 +420,27 @@ DEFAULT_BASE_URL=http://agentgateway.agents:8080/v1 GATEWAY_MODELS_NAMESPACE=age
 ### Console in the cluster
 
 With `CONSOLE_DISCOVERY=kubernetes` the console watches the Agents in `CONSOLE_NAMESPACE` (default `agents`) instead of a fixed list, and uses each one's `status.url`. `GET /api/agents/events` sends an event whenever an Agent is added, changed or deleted, so the UI updates its list at once: a `kubectl apply` shows up in the open console within a second or two, and a `kubectl delete` removes it. Agents whose rollout is not finished are listed as not ready.
+
+### Sign-in and who sees which agent (optional)
+
+`deploy/auth.sh` adds Keycloak (namespace `auth`) and puts sign-in on the console: an oauth2-proxy sidecar does the login, and the console checks the user's token on every API call. `deploy/auth.sh delete` removes it all again; the rest of the platform is untouched either way.
+
+```sh
+deploy/auth.sh                 # Keycloak, the realm with alice (sales), bob (engineering), admin (platform-admins)
+deploy/auth.sh users           # their password
+open http://<host>:32000       # <host>: this machine's tailnet name, or set AUTH_HOST; the script prints it
+```
+
+An Agent says who may use it; without `access` every signed-in user may, and `platform-admins` sees every agent:
+
+```yaml
+spec:
+  access:
+    groups: [sales]        # the token's groups claim
+    users: [bob]           # preferred_username
+```
+
+Others don't see the agent in the console, and calls to it answer 404. Changing `access` does not restart the agent. Agent Studio has the same two fields. The next steps, passing the user's identity on to agents and MCP tools, are in [docs/todo.md](docs/todo.md).
 
 ## Code map
 

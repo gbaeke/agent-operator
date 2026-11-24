@@ -8,6 +8,10 @@
 //!
 //! Set `OIDC_ISSUER` (and `OIDC_AUDIENCE`, default `agent-platform`) to turn
 //! this on. Without it the console is open, as for local runs.
+//!
+//! Who may use which agent comes from the Agent's `spec.access`: its groups
+//! and users. Members of `CONSOLE_ADMIN_GROUP` (default `platform-admins`)
+//! may use every agent.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -24,12 +28,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 
+use crate::registry::Access;
+
 /// Refetch the issuer's keys at most this often when a token names an unknown key.
 const KEY_REFRESH: Duration = Duration::from_secs(30);
 
 pub struct Auth {
     issuer: String,
     audience: String,
+    admin_group: String,
     http: reqwest::Client,
     keys: RwLock<Keys>,
 }
@@ -72,9 +79,11 @@ impl Auth {
             .filter(|issuer| !issuer.is_empty())?;
         let audience =
             std::env::var("OIDC_AUDIENCE").unwrap_or_else(|_| "agent-platform".to_owned());
+        let admin_group = std::env::var("CONSOLE_ADMIN_GROUP").unwrap_or_else(|_| "platform-admins".to_owned());
         Some(Arc::new(Self {
             issuer: issuer.trim_end_matches('/').to_owned(),
             audience,
+            admin_group,
             http,
             keys: RwLock::default(),
         }))
@@ -82,6 +91,19 @@ impl Auth {
 
     pub fn issuer(&self) -> &str {
         &self.issuer
+    }
+
+    pub fn is_admin(&self, user: &User) -> bool {
+        user.groups.contains(&self.admin_group)
+    }
+
+    /// Whether the user may use an agent with this `spec.access`.
+    /// No access list: everyone signed in. Admins: always.
+    pub fn allows(&self, user: &User, access: Option<&Access>) -> bool {
+        let Some(access) = access else { return true };
+        self.is_admin(user)
+            || access.users.contains(&user.username)
+            || access.groups.iter().any(|group| user.groups.contains(group))
     }
 
     /// The user a token belongs to, if the token is genuine and current.
@@ -218,11 +240,45 @@ mod tests {
         assert_eq!(token(&headers), Some("xyz"));
     }
 
+    fn user(username: &str, groups: &[&str]) -> User {
+        User {
+            sub: username.into(),
+            username: username.into(),
+            name: None,
+            email: None,
+            groups: groups.iter().map(|group| group.to_string()).collect(),
+            token: String::new(),
+        }
+    }
+
+    #[test]
+    fn decides_who_may_use_an_agent() {
+        let auth = Auth {
+            issuer: String::new(),
+            audience: String::new(),
+            admin_group: "platform-admins".into(),
+            http: reqwest::Client::new(),
+            keys: RwLock::default(),
+        };
+        let (alice, bob, admin) =
+            (user("alice", &["sales"]), user("bob", &["engineering"]), user("root", &["platform-admins"]));
+        let sales = Access { groups: vec!["sales".into()], users: vec![] };
+        let sales_and_bob = Access { groups: vec!["sales".into()], users: vec!["bob".into()] };
+        let nobody = Access::default();
+        assert!(auth.allows(&bob, None));
+        assert!(auth.allows(&alice, Some(&sales)));
+        assert!(!auth.allows(&bob, Some(&sales)));
+        assert!(auth.allows(&bob, Some(&sales_and_bob)));
+        assert!(!auth.allows(&alice, Some(&nobody)));
+        assert!(auth.allows(&admin, Some(&nobody)));
+    }
+
     #[tokio::test]
     async fn rejects_garbage_before_fetching_keys() {
         let auth = Auth {
             issuer: "http://127.0.0.1:9/realms/x".into(),
             audience: "agent-platform".into(),
+            admin_group: "platform-admins".into(),
             http: reqwest::Client::new(),
             keys: RwLock::default(),
         };

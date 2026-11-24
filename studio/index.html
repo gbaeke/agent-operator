@@ -195,6 +195,10 @@
       <fieldset>
         <legend>Console</legend>
         <label><span><b>Example prompts</b> · one per line, shown as buttons</span><textarea id="f-examples"></textarea></label>
+        <div class="row">
+          <label><span><b>Groups</b> · who may use it, comma-separated</span><input type="text" id="f-access-groups" placeholder="everyone signed in, e.g. sales"></label>
+          <label><span><b>Users</b> · usernames, comma-separated</span><input type="text" id="f-access-users" placeholder="e.g. alice, bob"></label>
+        </div>
       </fieldset>
 
       <fieldset>
@@ -337,7 +341,9 @@ function fill({ name = "", spec = {}, skills: s = [], existingSkills = [], knowl
   $("f-examples").value = (spec.examples || []).join("\n");
   $("f-turns").value = spec.maxTurns ?? "";
   $("f-replicas").value = spec.replicas ?? "";
-  const kept = Object.keys(spec).filter((key) => !["name", "description", "model", "instructions", "tools", "mcpServers", "examples", "maxTurns", "replicas", "baseUrl", "maxTokens"].includes(key));
+  $("f-access-groups").value = (spec.access?.groups || []).join(", ");
+  $("f-access-users").value = (spec.access?.users || []).join(", ");
+  const kept = Object.keys(spec).filter((key) => !["name", "description", "model", "instructions", "tools", "mcpServers", "examples", "maxTurns", "replicas", "baseUrl", "maxTokens", "access"].includes(key));
   $("kept").hidden = kept.length === 0;
   $("kept").textContent = kept.length ? `Kept as they are, not shown in this form: ${kept.join(", ")}.` : "";
   nameTouched = !!name;
@@ -375,6 +381,11 @@ function collect() {
   set("examples", $("f-examples").value.split("\n").map((e) => e.trim()).filter(Boolean));
   set("maxTurns", $("f-turns").value ? Number($("f-turns").value) : null);
   set("replicas", $("f-replicas").value ? Number($("f-replicas").value) : null);
+  // Who may use it in the console; both empty means everyone signed in.
+  const list = (id) => $(id).value.split(",").map((v) => v.trim()).filter(Boolean);
+  const access = { groups: list("f-access-groups"), users: list("f-access-users") };
+  for (const key of ["groups", "users"]) if (!access[key].length) delete access[key];
+  set("access", Object.keys(access).length ? access : null);
   return {
     name: $("f-name").value.trim(),
     spec,

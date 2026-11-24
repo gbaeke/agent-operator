@@ -33,6 +33,23 @@ spec:
         properties:
           spec:
             properties:
+              access:
+                description: |-
+                  Who may use the agent in the console, when it requires sign-in.
+                  Absent: every signed-in user. The console's admin group sees every agent.
+                nullable: true
+                properties:
+                  groups:
+                    description: Groups (the token's `groups` claim) whose members may use the agent.
+                    items:
+                      type: string
+                    type: array
+                  users:
+                    description: Users (the token's `preferred_username`) who may use the agent.
+                    items:
+                      type: string
+                    type: array
+                type: object
               baseUrl:
                 description: |-
                   Send model calls here instead, e.g. a gateway. Empty means unset.

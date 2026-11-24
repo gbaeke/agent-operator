@@ -45,6 +45,21 @@ pub struct AgentSpec {
     /// CPU and memory for each pod.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
+    /// Who may use the agent in the console, when it requires sign-in.
+    /// Absent: every signed-in user. The console's admin group sees every agent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<Access>,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, Default, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Access {
+    /// Groups (the token's `groups` claim) whose members may use the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
+    /// Users (the token's `preferred_username`) who may use the agent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub users: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Clone, Debug, PartialEq)]

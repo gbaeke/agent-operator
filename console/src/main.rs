@@ -17,7 +17,8 @@
 //! whenever that list changes.
 //!
 //! With `OIDC_ISSUER` set, every `/api` request needs a valid user token
-//! (from the oauth2-proxy sidecar); see `auth.rs`.
+//! (from the oauth2-proxy sidecar), and each user sees only the agents their
+//! `spec.access` allows; see `auth.rs`.
 
 mod auth;
 mod registry;
@@ -27,8 +28,8 @@ use std::time::Duration;
 
 use axum::body::{Body, Bytes};
 use axum::extract::{Path, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::from_fn_with_state;
+use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -39,7 +40,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::broadcast;
 
 use auth::{Auth, User};
-use registry::Registry;
+use registry::{AgentRef, Registry};
 
 struct AppState {
     auth: Option<Arc<Auth>>,
@@ -60,18 +61,15 @@ struct AgentStatus {
 
 /// Every agent with its info, asked in parallel. A slow or down agent
 /// shows as unhealthy instead of holding up the list.
-async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentStatus>> {
-    let checks = state.registry.agents().into_iter().map(|agent| {
+async fn list_agents(State(state): State<Arc<AppState>>, user: Option<Extension<User>>) -> Json<Vec<AgentStatus>> {
+    let user = user.map(|Extension(user)| user);
+    let visible = state.registry.agents().into_iter().filter(|agent| state.allows(user.as_ref(), agent));
+    let checks = visible.map(|agent| {
         let http = state.http.clone();
         async move {
             // An Agent whose rollout is not done is listed, but not asked.
             if let Some(reason) = agent.not_ready {
-                return AgentStatus {
-                    id: agent.id,
-                    healthy: false,
-                    info: None,
-                    error: Some(reason),
-                };
+                return AgentStatus { id: agent.id, healthy: false, info: None, error: Some(reason) };
             }
             let result = async {
                 let response = http
@@ -84,24 +82,10 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentStatus
             }
             .await;
             match result {
-                Ok(info) => AgentStatus {
-                    id: agent.id,
-                    healthy: true,
-                    info: Some(info),
-                    error: None,
-                },
+                Ok(info) => AgentStatus { id: agent.id, healthy: true, info: Some(info), error: None },
                 Err(error) => {
-                    tracing::warn!(
-                        "agent {} at {} is not reachable: {error}",
-                        agent.id,
-                        agent.url
-                    );
-                    AgentStatus {
-                        id: agent.id,
-                        healthy: false,
-                        info: None,
-                        error: Some("not reachable".to_owned()),
-                    }
+                    tracing::warn!("agent {} at {} is not reachable: {error}", agent.id, agent.url);
+                    AgentStatus { id: agent.id, healthy: false, info: None, error: Some("not reachable".to_owned()) }
                 }
             }
         }
@@ -109,11 +93,22 @@ async fn list_agents(State(state): State<Arc<AppState>>) -> Json<Vec<AgentStatus
     Json(futures::future::join_all(checks).await)
 }
 
+impl AppState {
+    /// Whether this user may see and use this agent. Open consoles allow everything.
+    fn allows(&self, user: Option<&User>, agent: &AgentRef) -> bool {
+        match (&self.auth, user) {
+            (None, _) => true,
+            (Some(auth), Some(user)) => auth.allows(user, agent.access.as_ref()),
+            (Some(_), None) => false,
+        }
+    }
+}
+
 /// Who is signed in, and where to sign out. Open consoles have no user.
 async fn me(State(state): State<Arc<AppState>>, user: Option<Extension<User>>) -> Json<Value> {
     match (&state.auth, user) {
-        (Some(_), Some(Extension(user))) => {
-            Json(json!({ "user": user, "sign_out": "oauth2/sign_out" }))
+        (Some(auth), Some(Extension(user))) => {
+            Json(json!({ "user": user, "admin": auth.is_admin(&user), "sign_out": "oauth2/sign_out" }))
         }
         _ => Json(json!({ "user": null })),
     }
@@ -124,10 +119,9 @@ async fn agent_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let events = futures::stream::unfold(state.changes.subscribe(), |mut changes| async move {
         match changes.recv().await {
             // A lagging receiver still learns that something changed.
-            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => Some((
-                Ok::<_, std::convert::Infallible>(Event::default().data("changed")),
-                changes,
-            )),
+            Ok(()) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some((Ok::<_, std::convert::Infallible>(Event::default().data("changed")), changes))
+            }
             Err(broadcast::error::RecvError::Closed) => None,
         }
     });
@@ -137,35 +131,23 @@ async fn agent_events(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// Passes one request to the agent's `/v1/{operation}` and streams the answer back.
 async fn forward(
     State(state): State<Arc<AppState>>,
+    user: Option<Extension<User>>,
     Path((id, operation)): Path<(String, String)>,
     method: Method,
     body: Bytes,
 ) -> Response {
     // Only the agent API; nothing else on the agent is reachable through the console.
-    if !matches!(
-        (&method, operation.as_str()),
-        (&Method::GET, "info") | (&Method::POST, "chat" | "reset")
-    ) {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("no operation `{operation}`") })),
-        )
-            .into_response();
+    if !matches!((&method, operation.as_str()), (&Method::GET, "info") | (&Method::POST, "chat" | "reset")) {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no operation `{operation}`") }))).into_response();
     }
-    let Some(agent) = state.registry.get(&id) else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "error": format!("no agent `{id}`") })),
-        )
-            .into_response();
+    // An agent this user may not use looks the same as one that does not exist.
+    let user = user.map(|Extension(user)| user);
+    let Some(agent) = state.registry.get(&id).filter(|agent| state.allows(user.as_ref(), agent)) else {
+        return (StatusCode::NOT_FOUND, Json(json!({ "error": format!("no agent `{id}`") }))).into_response();
     };
-    let mut request = state
-        .http
-        .request(method, format!("{}/v1/{operation}", agent.url));
+    let mut request = state.http.request(method, format!("{}/v1/{operation}", agent.url));
     if !body.is_empty() {
-        request = request
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(body);
+        request = request.header(header::CONTENT_TYPE, "application/json").body(body);
     }
     // No overall timeout: a chat turn streams for as long as the agent works.
     // When the browser goes away, this stream is dropped, which ends the
@@ -183,14 +165,10 @@ async fn forward(
     let mut proxied = Response::new(Body::from_stream(response.bytes_stream()));
     *proxied.status_mut() = status;
     if let Some(content_type) = content_type {
-        proxied
-            .headers_mut()
-            .insert(header::CONTENT_TYPE, content_type);
+        proxied.headers_mut().insert(header::CONTENT_TYPE, content_type);
     }
     // Keeps reverse proxies (such as an ingress) from buffering the event stream.
-    proxied
-        .headers_mut()
-        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    proxied.headers_mut().insert("x-accel-buffering", HeaderValue::from_static("no"));
     proxied
 }
 
@@ -198,9 +176,7 @@ async fn forward(
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .init();
 
@@ -232,11 +208,7 @@ async fn main() -> anyhow::Result<()> {
             .build()?,
     });
     // The shared UI, switched to console mode.
-    let page = include_str!("../../ui/index.html").replacen(
-        r#"data-mode="agent""#,
-        r#"data-mode="console""#,
-        1,
-    );
+    let page = include_str!("../../ui/index.html").replacen(r#"data-mode="agent""#, r#"data-mode="console""#, 1);
     let api = Router::new()
         .route("/api/me", get(me))
         .route("/api/agents", get(list_agents))
@@ -265,12 +237,6 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn forward_info(state: State<Arc<AppState>>, Path(id): Path<String>) -> Response {
-    forward(
-        state,
-        Path((id, "info".to_owned())),
-        Method::GET,
-        Bytes::new(),
-    )
-    .await
+async fn forward_info(state: State<Arc<AppState>>, user: Option<Extension<User>>, Path(id): Path<String>) -> Response {
+    forward(state, user, Path((id, "info".to_owned())), Method::GET, Bytes::new()).await
 }

@@ -113,6 +113,7 @@ pub fn render(dir: &Path, name: Option<&str>, namespace: &str) -> anyhow::Result
         image: None,
         env: Vec::new(),
         resources: None,
+        access: None,
     };
     let mut agent = Agent::new(&name, spec);
     agent.metadata.namespace = Some(namespace.to_owned());

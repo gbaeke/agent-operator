@@ -11,6 +11,7 @@ use futures::StreamExt;
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::runtime::{WatchStreamExt, reflector, watcher};
 use kube::{Api, ResourceExt};
+use serde::Deserialize;
 use tokio::sync::broadcast;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +20,17 @@ pub struct AgentRef {
     pub url: String,
     /// Why the agent cannot be used yet, e.g. its rollout is not finished.
     pub not_ready: Option<String>,
+    /// Who may use it (`spec.access`); `None` is everyone signed in.
+    pub access: Option<Access>,
+}
+
+/// An Agent's `spec.access`.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct Access {
+    #[serde(default)]
+    pub groups: Vec<String>,
+    #[serde(default)]
+    pub users: Vec<String>,
 }
 
 pub enum Registry {
@@ -33,8 +45,7 @@ impl Registry {
         let (changes, _) = broadcast::channel(16);
         match std::env::var("CONSOLE_DISCOVERY").as_deref() {
             Ok("kubernetes") => {
-                let namespace =
-                    std::env::var("CONSOLE_NAMESPACE").unwrap_or_else(|_| "agents".to_owned());
+                let namespace = std::env::var("CONSOLE_NAMESPACE").unwrap_or_else(|_| "agents".to_owned());
                 let store = watch_agents(&namespace, changes.clone()).await?;
                 tracing::info!("watching Agents in namespace {namespace}");
                 Ok((Self::Kubernetes(store), changes))
@@ -51,11 +62,7 @@ impl Registry {
         match self {
             Self::Static(agents) => agents.clone(),
             Self::Kubernetes(store) => {
-                let mut agents: Vec<AgentRef> = store
-                    .state()
-                    .iter()
-                    .filter_map(|agent| from_resource(agent))
-                    .collect();
+                let mut agents: Vec<AgentRef> = store.state().iter().filter_map(|agent| from_resource(agent)).collect();
                 agents.sort_by(|a, b| a.id.cmp(&b.id));
                 agents
             }
@@ -71,41 +78,26 @@ impl Registry {
 fn from_resource(agent: &DynamicObject) -> Option<AgentRef> {
     let status = agent.data.get("status");
     let field = |name: &str| status.and_then(|status| status.get(name));
-    let url = field("url")
-        .and_then(|url| url.as_str())?
-        .trim_end_matches('/')
-        .to_owned();
-    let ready = field("ready")
-        .and_then(|ready| ready.as_bool())
-        .unwrap_or(false);
-    let message = field("message")
-        .and_then(|message| message.as_str())
-        .unwrap_or("starting");
-    Some(AgentRef {
-        id: agent.name_any(),
-        url,
-        not_ready: (!ready).then(|| message.to_owned()),
-    })
+    let url = field("url").and_then(|url| url.as_str())?.trim_end_matches('/').to_owned();
+    let ready = field("ready").and_then(|ready| ready.as_bool()).unwrap_or(false);
+    let message = field("message").and_then(|message| message.as_str()).unwrap_or("starting");
+    // A malformed spec.access admits nobody but admins, rather than everybody.
+    let access = agent.data.pointer("/spec/access").map(|access| {
+        serde_json::from_value(access.clone()).unwrap_or_else(|error| {
+            tracing::warn!("Agent {}: spec.access is not valid ({error}); only admins may use it", agent.name_any());
+            Access::default()
+        })
+    });
+    Some(AgentRef { id: agent.name_any(), url, not_ready: (!ready).then(|| message.to_owned()), access })
 }
 
-async fn watch_agents(
-    namespace: &str,
-    changes: broadcast::Sender<()>,
-) -> anyhow::Result<reflector::Store<DynamicObject>> {
-    let client = kube::Client::try_default()
-        .await
-        .context("no Kubernetes configuration for CONSOLE_DISCOVERY=kubernetes")?;
-    let resource = ApiResource::from_gvk(&GroupVersionKind::gvk(
-        "agents.baeke.info",
-        "v1alpha1",
-        "Agent",
-    ));
+async fn watch_agents(namespace: &str, changes: broadcast::Sender<()>) -> anyhow::Result<reflector::Store<DynamicObject>> {
+    let client = kube::Client::try_default().await.context("no Kubernetes configuration for CONSOLE_DISCOVERY=kubernetes")?;
+    let resource = ApiResource::from_gvk(&GroupVersionKind::gvk("agents.baeke.info", "v1alpha1", "Agent"));
     let api = Api::<DynamicObject>::namespaced_with(client, namespace, &resource);
     let writer = reflector::store::Writer::new(resource);
     let store = writer.as_reader();
-    let events = watcher(api, watcher::Config::default())
-        .default_backoff()
-        .reflect(writer);
+    let events = watcher(api, watcher::Config::default()).default_backoff().reflect(writer);
     tokio::spawn(async move {
         futures::pin_mut!(events);
         while let Some(event) = events.next().await {
@@ -125,20 +117,10 @@ async fn watch_agents(
 
 pub fn parse_agents(spec: &str) -> anyhow::Result<Vec<AgentRef>> {
     let mut agents: Vec<AgentRef> = Vec::new();
-    for pair in spec
-        .split(',')
-        .map(str::trim)
-        .filter(|pair| !pair.is_empty())
-    {
-        let (id, url) = pair
-            .split_once('=')
-            .with_context(|| format!("`{pair}` in CONSOLE_AGENTS is not id=url"))?;
+    for pair in spec.split(',').map(str::trim).filter(|pair| !pair.is_empty()) {
+        let (id, url) = pair.split_once('=').with_context(|| format!("`{pair}` in CONSOLE_AGENTS is not id=url"))?;
         let (id, url) = (id.trim(), url.trim().trim_end_matches('/'));
-        if id.is_empty()
-            || !id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
             bail!("agent id `{id}` may only have letters, digits, - and _");
         }
         if !url.starts_with("http://") && !url.starts_with("https://") {
@@ -147,11 +129,7 @@ pub fn parse_agents(spec: &str) -> anyhow::Result<Vec<AgentRef>> {
         if agents.iter().any(|agent| agent.id == id) {
             bail!("agent `{id}` is listed twice in CONSOLE_AGENTS");
         }
-        agents.push(AgentRef {
-            id: id.to_owned(),
-            url: url.to_owned(),
-            not_ready: None,
-        });
+        agents.push(AgentRef { id: id.to_owned(), url: url.to_owned(), not_ready: None, access: None });
     }
     Ok(agents)
 }
@@ -162,8 +140,7 @@ mod tests {
 
     #[test]
     fn parses_the_agent_list() {
-        let agents =
-            parse_agents(" quokka=http://quokka:3000/ , trip-planner=http://trip:3000,").unwrap();
+        let agents = parse_agents(" quokka=http://quokka:3000/ , trip-planner=http://trip:3000,").unwrap();
         assert_eq!(agents.len(), 2);
         assert_eq!(agents[0].url, "http://quokka:3000");
         assert_eq!(agents[1].id, "trip-planner");
@@ -179,30 +156,37 @@ mod tests {
     }
 
     fn resource(status: serde_json::Value) -> DynamicObject {
+        with_spec(serde_json::json!({}), status)
+    }
+
+    fn with_spec(spec: serde_json::Value, status: serde_json::Value) -> DynamicObject {
         serde_json::from_value(serde_json::json!({
             "apiVersion": "agents.baeke.info/v1alpha1", "kind": "Agent",
             "metadata": { "name": "pirate", "namespace": "agents" },
-            "spec": {}, "status": status,
+            "spec": spec, "status": status,
         }))
         .unwrap()
     }
 
     #[test]
+    fn reads_access() {
+        let status = serde_json::json!({ "ready": true, "url": "http://p:3000" });
+        let open = from_resource(&with_spec(serde_json::json!({}), status.clone())).unwrap();
+        assert_eq!(open.access, None);
+        let sales = from_resource(&with_spec(serde_json::json!({ "access": { "groups": ["sales"] } }), status.clone()));
+        assert_eq!(sales.unwrap().access, Some(Access { groups: vec!["sales".into()], users: vec![] }));
+        let broken = from_resource(&with_spec(serde_json::json!({ "access": { "groups": "sales" } }), status));
+        assert_eq!(broken.unwrap().access, Some(Access::default()));
+    }
+
+    #[test]
     fn reads_agent_resources() {
-        let ready = from_resource(&resource(
-            serde_json::json!({ "ready": true, "url": "http://pirate.agents:3000" }),
-        ));
+        let ready = from_resource(&resource(serde_json::json!({ "ready": true, "url": "http://pirate.agents:3000" })));
         assert_eq!(
             ready,
-            Some(AgentRef {
-                id: "pirate".into(),
-                url: "http://pirate.agents:3000".into(),
-                not_ready: None
-            })
+            Some(AgentRef { id: "pirate".into(), url: "http://pirate.agents:3000".into(), not_ready: None, access: None })
         );
-        let rolling = from_resource(&resource(
-            serde_json::json!({ "ready": false, "url": "http://p:3000", "message": "rolling out" }),
-        ));
+        let rolling = from_resource(&resource(serde_json::json!({ "ready": false, "url": "http://p:3000", "message": "rolling out" })));
         assert_eq!(rolling.unwrap().not_ready.as_deref(), Some("rolling out"));
         // Not reconciled yet: no URL, so not listed.
         assert_eq!(from_resource(&resource(serde_json::json!({}))), None);
