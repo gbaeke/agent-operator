@@ -18,7 +18,7 @@ CLUSTER="${KIND_CLUSTER:-agents}"
 ROOT="$(dirname "$(realpath "$0")")/.."
 DEPLOY="$ROOT/deploy"
 TAG=dev
-IMAGES=(agent-runtime agent-operator agent-console mcp-server)
+IMAGES=(agent-runtime agent-runtime-python agent-operator agent-console mcp-server)
 k() { kubectl --context "kind-$CLUSTER" "$@"; }
 
 build() {

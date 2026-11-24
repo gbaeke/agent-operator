@@ -173,7 +173,8 @@ Only the name and description of each skill go into the system prompt. The agent
 ## Containers
 
 ```sh
-docker build --target agent-runtime -t agent-runtime .   # ~47 MB, distroless, no agent inside
+docker build --target agent-runtime -t agent-runtime .                 # ~51 MB, distroless, no shell, no agent inside
+docker build --target agent-runtime-python -t agent-runtime-python .   # ~95 MB: the same, on Alpine with sh and Python 3
 docker build --target mcp-server -t mcp-server .
 ```
 
