@@ -5,7 +5,8 @@
 #
 # AUTH_HOST is the name your browser uses for this machine. Default: its
 # tailnet name if tailscale runs, else keycloak.localtest.me (127.0.0.1).
-# The console must be opened on the same host (http://$AUTH_HOST:32000).
+# Open the console at http://$AUTH_HOST:32000, or http://localhost:32000 on
+# this machine (oauth2-proxy sends Keycloak back to the host you came from).
 # It is fixed when Keycloak is first deployed; to change it, delete and apply.
 #
 #   deploy/auth.sh            apply, wait until Keycloak is ready, put sign-in on the console
@@ -118,7 +119,7 @@ console_on() {
       --from-literal=OAUTH2_PROXY_CLIENT_SECRET="$(secret keycloak-realm console-client-secret)" \
       --from-literal=OAUTH2_PROXY_COOKIE_SECRET="$(openssl rand -hex 16)" \
       --from-literal=OAUTH2_PROXY_OIDC_ISSUER_URL="$ISSUER" \
-      --from-literal=OAUTH2_PROXY_REDIRECT_URL="http://$HOST:32000/oauth2/callback" \
+      --from-literal=OAUTH2_PROXY_REDIRECT_URL="/oauth2/callback" \
       --from-literal=OAUTH2_PROXY_BACKEND_LOGOUT_URL="$ISSUER/protocol/openid-connect/logout?id_token_hint={id_token}"
   fi
   k -n agents patch deployment agent-console --type strategic --patch-file "$DIR/console-patch.yaml" >/dev/null

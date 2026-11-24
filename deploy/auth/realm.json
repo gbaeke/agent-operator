@@ -23,11 +23,11 @@
       "standardFlowEnabled": true,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "redirectUris": ["http://${AUTH_HOST}:32000/oauth2/callback"],
-      "webOrigins": ["http://${AUTH_HOST}:32000"],
+      "redirectUris": ["http://${AUTH_HOST}:32000/oauth2/callback", "http://localhost:32000/oauth2/callback"],
+      "webOrigins": ["http://${AUTH_HOST}:32000", "http://localhost:32000"],
       "attributes": {
         "pkce.code.challenge.method": "S256",
-        "post.logout.redirect.uris": "http://${AUTH_HOST}:32000/*"
+        "post.logout.redirect.uris": "http://${AUTH_HOST}:32000/*##http://localhost:32000/*"
       },
       "protocolMappers": [
         {
